@@ -1,0 +1,43 @@
+INFO:     Started server process [16100]
+INFO:     Waiting for application startup.
+2026-09-06 16:26:59,351 INFO     synora: Synora API ready (environment=development)
+2026-09-06 16:26:59,351 WARNING  synora: EXPOSE_DEV_OTP is on: verification codes are returned in API responses.
+2026-09-06 16:26:59,353 WARNING  synora: SMTP is not configured: verification codes are printed to this console.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+2026-09-06 16:39:50,199 WARNING  synora.mailer: SMTP is not configured, printing the message instead.
+To: ayubovasadbek33@gmail.com
+Your Synora verification code is 809363.
+
+It expires in 10 minutes.
+If you didn't request this, you can ignore this email.
+2026-09-06 16:41:33,479 WARNING  synora.mailer: SMTP is not configured, printing the message instead.
+To: wired24776@example.com
+Your Synora verification code is 163618.
+
+It expires in 10 minutes.
+If you didn't request this, you can ignore this email.
+2026-09-06 16:41:52,329 WARNING  synora.mailer: SMTP is not configured, printing the message instead.
+To: ref30199@example.com
+Your Synora verification code is 869445.
+
+It expires in 10 minutes.
+If you didn't request this, you can ignore this email.
+2026-09-06 16:45:52,936 WARNING  synora.mailer: SMTP is not configured, printing the message instead.
+To: ref29710@example.com
+Your Synora verification code is 178394.
+
+It expires in 10 minutes.
+If you didn't request this, you can ignore this email.
+2026-09-06 17:03:25,510 WARNING  synora.mailer: SMTP is not configured, printing the message instead.
+To: mx32453@example.com
+Your Synora verification code is 318931.
+
+It expires in 10 minutes.
+If you didn't request this, you can ignore this email.
+2026-09-06 17:17:54,186 WARNING  synora.mailer: SMTP is not configured, printing the message instead.
+To: final27488@example.com
+Your Synora verification code is 134151.
+
+It expires in 10 minutes.
+If you didn't request this, you can ignore this email.
