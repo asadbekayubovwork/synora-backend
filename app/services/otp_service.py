@@ -13,7 +13,7 @@ from app.core.exceptions import BadRequestError, TooManyRequestsError
 from app.core.security import generate_otp, hash_otp, verify_otp
 from app.db.base import as_utc, utcnow
 from app.models.otp import OtpCode, OtpPurpose
-from app.services.mailer import send_otp_email
+from app.services.mailer import send_otp_email, send_password_reset_email
 
 
 @dataclass(frozen=True)
@@ -73,7 +73,12 @@ async def issue_otp(
     )
     await session.flush()
 
-    await send_otp_email(email, code, settings.otp_ttl_minutes)
+    send = (
+        send_password_reset_email
+        if purpose is OtpPurpose.RESET_PASSWORD
+        else send_otp_email
+    )
+    await send(email, code, settings.otp_ttl_minutes)
 
     return IssuedOtp(
         code=code,

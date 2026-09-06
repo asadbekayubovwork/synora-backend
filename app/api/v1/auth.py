@@ -6,14 +6,19 @@ from app.api.deps import CurrentUser, SessionDep, get_user_from_refresh_token
 from app.core.config import settings
 from app.schemas.auth import (
     ErrorResponse,
+    ForgotPasswordRequest,
     LoginRequest,
+    MessageResponse,
     OtpSentResponse,
     RefreshTokenRequest,
     RegisterRequest,
     ResendOtpRequest,
+    ResetPasswordRequest,
+    ResetTokenResponse,
     TokenResponse,
     UserResponse,
     VerifyOtpRequest,
+    VerifyResetOtpRequest,
 )
 from app.services import auth_service
 from app.services.otp_service import IssuedOtp
@@ -138,6 +143,77 @@ async def refresh(payload: RefreshTokenRequest, session: SessionDep) -> TokenRes
         expires_in=tokens.expires_in,
         user=UserResponse.model_validate(tokens.user),
     )
+
+
+@router.post(
+    "/forgot-password",
+    response_model=OtpSentResponse,
+    responses=ERRORS,
+    summary="Password reset — step 1 of 3",
+    description=(
+        "Mails a reset code to the address.\n\n"
+        "**Always answers the same**, whether or not an account exists, so this "
+        "cannot be used to discover which emails are registered — which also "
+        "means a `200` is not a promise that mail was sent. Call it again to "
+        "resend; the previous code stops working, subject to the same "
+        f"{settings.otp_resend_cooldown_seconds}-second cooldown as registration."
+    ),
+)
+async def forgot_password(payload: ForgotPasswordRequest, session: SessionDep) -> OtpSentResponse:
+    issued = await auth_service.forgot_password(session, payload.email)
+    message = "If an account exists for this email, a reset code has been sent."
+
+    if issued is None:
+        # Nothing was sent, but the shape and timing must not give that away.
+        return OtpSentResponse(
+            message=message,
+            email=payload.email,
+            expires_in=settings.otp_ttl_minutes * 60,
+            resend_available_in=settings.otp_resend_cooldown_seconds,
+            dev_code=None,
+        )
+
+    return _otp_sent(payload.email, issued, message)
+
+
+@router.post(
+    "/verify-reset-otp",
+    response_model=ResetTokenResponse,
+    responses=ERRORS,
+    summary="Password reset — step 2 of 3 (verify the emailed code)",
+    description=(
+        "Exchanges a correct reset code for a `reset_token`, which is what "
+        "authorises the final step — so the new password cannot be set by "
+        "anyone who has not proved they can read the mailbox.\n\n"
+        f"The token is good for {settings.reset_token_ttl_minutes} minutes and "
+        "works once.\n\n"
+        "One caveat on enumeration: step 1 hides whether an account exists, but "
+        "a wrong code here answers `otp_invalid` only when a code was actually "
+        "issued, and `otp_not_found` otherwise. Closing that would mean storing "
+        "decoy codes for addresses nobody registered."
+    ),
+)
+async def verify_reset_otp(payload: VerifyResetOtpRequest, session: SessionDep) -> ResetTokenResponse:
+    token, expires_in = await auth_service.verify_reset_otp(session, payload.email, payload.code)
+    return ResetTokenResponse(reset_token=token, expires_in=expires_in)
+
+
+@router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+    responses=ERRORS,
+    summary="Password reset — step 3 of 3 (set the new password)",
+    description=(
+        "Sets the new password, given the `reset_token` from step 2.\n\n"
+        "Note that sessions opened before the reset keep working: tokens are "
+        "stateless and carry no password version to invalidate them."
+    ),
+)
+async def reset_password(payload: ResetPasswordRequest, session: SessionDep) -> MessageResponse:
+    await auth_service.reset_password(
+        session, payload.email, payload.reset_token, payload.password
+    )
+    return MessageResponse(message="Your password has been changed. You can sign in now.")
 
 
 @router.get(

@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_ttl_minutes: int = 30
     refresh_token_ttl_days: int = 30
+    # How long the holder of a verified reset code has to choose a new password.
+    reset_token_ttl_minutes: int = 15
     password_min_length: int = 8
 
     # --- OTP ---------------------------------------------------------------

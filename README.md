@@ -48,6 +48,9 @@ All under `/api/v1`.
 | `POST` | `/auth/login`       | Email + password → tokens |
 | `POST` | `/auth/refresh`     | Refresh token → a new pair |
 | `GET`  | `/auth/me`          | The signed-in user (`Authorization: Bearer …`) |
+| `POST` | `/auth/forgot-password`  | Reset step 1 — mails a code, and doubles as the resend |
+| `POST` | `/auth/verify-reset-otp` | Reset step 2 — code → `reset_token` |
+| `POST` | `/auth/reset-password`   | Reset step 3 — sets the new password |
 | `GET`  | `/health`           | Liveness probe |
 
 ### The registration flow
@@ -72,6 +75,32 @@ curl -X POST http://127.0.0.1:8000/api/v1/auth/verify-otp \
 
 Logging in before that step returns `403` / `email_not_verified`, which is the
 frontend's cue to send the user back to the code screen.
+
+### The password-reset flow
+
+`forgot-password` → `verify-reset-otp` → `reset-password`, mirroring the pages
+under `/forgot-password`.
+
+Step 1 answers identically whether or not the account exists, so it cannot be
+used to discover who is registered — which also means a `200` is not a promise
+that mail was sent. Unverified signups get nothing: they have no confirmed
+mailbox, and registering again replaces the password anyway.
+
+Step 2 returns a `reset_token`: a short-lived JWT carrying a fingerprint of the
+password hash it was issued against. That makes it single-use without any
+ticket table — completing the reset changes the hash, so a replay stops
+matching and returns `reset_token_used`.
+
+Two things this flow deliberately does **not** do:
+
+- **Sessions survive a reset.** Access and refresh tokens are stateless and
+  carry no password version, so anyone already signed in stays signed in.
+  Kicking them out needs a `token_version` column on `users`, checked when a
+  token is decoded — and, since `init_db()` cannot alter an existing table, a
+  migration for the deployed database.
+- **Step 2 still leaks a little.** A wrong code answers `otp_invalid` only when
+  a code was really issued, and `otp_not_found` otherwise. Closing that means
+  storing decoy codes for addresses nobody registered.
 
 ### Errors
 
@@ -100,6 +129,9 @@ Every non-2xx body has the same shape:
 | `otp_expired`              | 400 | Code older than `OTP_TTL_MINUTES` |
 | `otp_too_many_attempts`    | 429 | Guess cap hit; the code was discarded |
 | `otp_cooldown`             | 429 | Resend asked for too soon (`Retry-After` header) |
+| `reset_token_invalid`      | 400 | Not a reset token, or not for this account |
+| `reset_token_expired`      | 400 | Older than `RESET_TOKEN_TTL_MINUTES` |
+| `reset_token_used`         | 400 | The password already changed under it |
 | `token_expired` / `token_invalid` | 401 | Bad or stale bearer token |
 | `account_disabled`         | 403 | `is_active` is false |
 

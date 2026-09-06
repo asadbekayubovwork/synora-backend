@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,13 +23,16 @@ from app.core.exceptions import (
 from app.core.security import (
     create_access_token,
     create_refresh_token,
+    create_reset_token,
+    decode_token,
     hash_password,
+    reset_token_matches_password,
     verify_password,
 )
 from app.db.base import utcnow
 from app.models.otp import OtpPurpose
 from app.models.user import User, normalize_email
-from app.services.otp_service import IssuedOtp, consume_otp, issue_otp
+from app.services.otp_service import IssuedOtp, consume_otp, discard_codes, issue_otp
 
 # Compared against when no user matches, so a missing address and a wrong
 # password take the same time to answer and cannot be told apart by timing.
@@ -174,3 +178,89 @@ async def refresh_tokens(session: AsyncSession, user: User) -> AuthTokens:
     tokens = _issue_tokens(user)
     await session.commit()
     return tokens
+
+
+# --- Password reset --------------------------------------------------------
+
+
+async def forgot_password(session: AsyncSession, email: str) -> IssuedOtp | None:
+    """Mail a reset code, or do nothing if there is no account to reset.
+
+    `None` means "nothing was sent". The route answers the same either way, so
+    this endpoint cannot be used to discover which emails are registered.
+    """
+    email = normalize_email(email)
+    user = await get_user_by_email(session, email)
+
+    # An unverified signup has no confirmed mailbox to send to, and its owner
+    # has a simpler route anyway: registering again replaces the password.
+    if user is None or not user.is_verified or not user.is_active:
+        return None
+
+    issued = await issue_otp(session, email, OtpPurpose.RESET_PASSWORD)
+    await session.commit()
+    return issued
+
+
+async def verify_reset_otp(session: AsyncSession, email: str, code: str) -> tuple[str, int]:
+    """Exchange a correct reset code for the token that authorises the change."""
+    email = normalize_email(email)
+    user = await get_user_by_email(session, email)
+
+    # The code is checked before the account is, so an address with no account
+    # fails on the missing code and is answered exactly like an address whose
+    # code has expired — rather than with a distinct "no such user".
+    await consume_otp(session, email, code, OtpPurpose.RESET_PASSWORD)
+
+    if user is None or not user.is_verified:
+        raise BadRequestError(
+            "No pending verification for this email.",
+            code="otp_not_found",
+        )
+
+    token = create_reset_token(str(user.id), user.password_hash)
+    await session.commit()
+    return token, settings.reset_token_ttl_minutes * 60
+
+
+async def reset_password(
+    session: AsyncSession,
+    email: str,
+    reset_token: str,
+    password: str,
+) -> None:
+    email = normalize_email(email)
+
+    try:
+        payload = decode_token(reset_token, "password_reset")
+    except jwt.ExpiredSignatureError:
+        raise BadRequestError(
+            "This reset link has expired. Start again.",
+            code="reset_token_expired",
+        ) from None
+    except jwt.InvalidTokenError:
+        raise BadRequestError(
+            "This reset link is not valid. Start again.",
+            code="reset_token_invalid",
+        ) from None
+
+    user = await get_user_by_email(session, email)
+    if user is None or str(user.id) != payload.get("sub"):
+        raise BadRequestError(
+            "This reset link is not valid. Start again.",
+            code="reset_token_invalid",
+        )
+
+    # The token carries a fingerprint of the password it was issued against, so
+    # a token that has already been spent no longer matches.
+    if not reset_token_matches_password(payload, user.password_hash):
+        raise BadRequestError(
+            "This reset link has already been used. Start again.",
+            code="reset_token_used",
+        )
+
+    user.password_hash = hash_password(password)
+
+    # Any code still outstanding for this address is now moot.
+    await discard_codes(session, email, OtpPurpose.RESET_PASSWORD)
+    await session.commit()

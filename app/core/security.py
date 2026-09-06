@@ -14,7 +14,7 @@ import jwt
 
 from app.core.config import settings
 
-TokenType = Literal["access", "refresh"]
+TokenType = Literal["access", "refresh", "password_reset"]
 
 # bcrypt hashes at most 72 bytes and raises on anything longer (4.2+), so long
 # passphrases are folded to a fixed-width digest first. Base64 keeps the digest
@@ -81,6 +81,36 @@ def create_access_token(subject: str) -> str:
 
 def create_refresh_token(subject: str) -> str:
     return _create_token(subject, "refresh", timedelta(days=settings.refresh_token_ttl_days))
+
+
+def _password_fingerprint(password_hash: str) -> str:
+    """A short digest of the stored hash, used to tie a reset token to it."""
+    return hashlib.sha256(password_hash.encode("utf-8")).hexdigest()[:16]
+
+
+def create_reset_token(subject: str, password_hash: str) -> str:
+    """Proof that the reset code was verified, for the final step to present.
+
+    The current password hash is baked in, which makes the token single-use for
+    free: completing the reset changes the hash, so a replay no longer matches
+    and there is no ticket table to keep or clean up.
+    """
+    now = datetime.now(UTC)
+    payload = {
+        "sub": subject,
+        "type": "password_reset",
+        "pwh": _password_fingerprint(password_hash),
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=settings.reset_token_ttl_minutes)).timestamp()),
+        "jti": str(uuid.uuid4()),
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def reset_token_matches_password(payload: dict[str, Any], password_hash: str) -> bool:
+    return hmac.compare_digest(
+        str(payload.get("pwh", "")), _password_fingerprint(password_hash)
+    )
 
 
 def decode_token(token: str, expected_type: TokenType) -> dict[str, Any]:

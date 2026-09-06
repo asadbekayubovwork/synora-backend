@@ -79,6 +79,37 @@ class RefreshTokenRequest(_Schema):
     refresh_token: str = Field(examples=["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."])
 
 
+class ForgotPasswordRequest(_Schema):
+    email: EmailStr = Field(examples=["ali@example.com"])
+
+    @field_validator("email")
+    @classmethod
+    def _normalize(cls, value: str) -> str:
+        return value.strip().lower()
+
+
+class VerifyResetOtpRequest(VerifyOtpRequest):
+    """Same shape as registration's step 2, against the reset code."""
+
+
+class ResetPasswordRequest(_Schema):
+    email: EmailStr = Field(examples=["ali@example.com"])
+    reset_token: str = Field(
+        description="From `POST /auth/verify-reset-otp`.",
+        examples=["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."],
+    )
+    password: str = Field(
+        min_length=settings.password_min_length,
+        max_length=128,
+        examples=["N3wStr0ngPassw0rd"],
+    )
+
+    @field_validator("email")
+    @classmethod
+    def _normalize(cls, value: str) -> str:
+        return value.strip().lower()
+
+
 # --- Responses -------------------------------------------------------------
 
 
@@ -115,6 +146,12 @@ class OtpSentResponse(_Schema):
         default=None,
         description="The code itself — development only, so you can test without a mailbox.",
     )
+
+
+class ResetTokenResponse(_Schema):
+    ok: bool = True
+    reset_token: str = Field(description="Present this to `POST /auth/reset-password`.")
+    expires_in: int = Field(description="Seconds until the reset token expires.")
 
 
 class MessageResponse(_Schema):

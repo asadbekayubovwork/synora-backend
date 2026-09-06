@@ -77,7 +77,7 @@ async def _send(to: str, subject: str, text: str, html: str) -> None:
         logger.error("Could not deliver mail to %s: %s", to, exc)
 
 
-def _otp_html(code: str, minutes_valid: int) -> str:
+def _otp_html(code: str, minutes_valid: int, heading: str, intro: str, footer: str) -> str:
     spaced_code = " ".join(code)
 
     return f"""\
@@ -87,7 +87,7 @@ def _otp_html(code: str, minutes_valid: int) -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>Verify your email</title>
+  <title>{heading}</title>
 </head>
 <body style="margin:0;padding:0;background-color:#f2f2f3;">
   <!-- Preview line: what the inbox list shows next to the subject. -->
@@ -114,13 +114,12 @@ def _otp_html(code: str, minutes_valid: int) -> str:
             <td style="padding:32px;">
               <h1 style="margin:0 0 10px;font-family:{FONT_STACK};font-size:26px;
                          font-weight:700;letter-spacing:-0.02em;color:#0a0a0a;">
-                Verify your email
+                {heading}
               </h1>
 
               <p style="margin:0 0 28px;font-family:{FONT_STACK};font-size:15px;
                         line-height:1.55;color:#6b6b6b;">
-                Enter this code in {BRAND} to finish creating your account.
-                It expires in {minutes_valid} minutes.
+                {intro} It expires in {minutes_valid} minutes.
               </p>
 
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
@@ -137,7 +136,7 @@ def _otp_html(code: str, minutes_valid: int) -> str:
 
               <p style="margin:20px 0 0;font-family:{FONT_STACK};font-size:13px;
                         line-height:1.55;color:#8a8a8a;">
-                If you didn't create a {BRAND} account, you can safely ignore this email.
+                {footer}
               </p>
             </td>
           </tr>
@@ -151,12 +150,43 @@ def _otp_html(code: str, minutes_valid: int) -> str:
 
 
 async def send_otp_email(to: str, code: str, minutes_valid: int) -> None:
+    """The registration code."""
     # The code leads the subject so it is readable from a phone notification
     # without opening the message.
     subject = f"{code} is your {BRAND} verification code"
+    footer = f"If you didn't create a {BRAND} account, you can safely ignore this email."
     text = (
         f"Your {BRAND} verification code is {code}.\n\n"
-        f"It expires in {minutes_valid} minutes.\n\n"
-        f"If you didn't create a {BRAND} account, you can safely ignore this email."
+        f"It expires in {minutes_valid} minutes.\n\n{footer}"
     )
-    await _send(to, subject, text, _otp_html(code, minutes_valid))
+    html = _otp_html(
+        code,
+        minutes_valid,
+        heading="Verify your email",
+        intro=f"Enter this code in {BRAND} to finish creating your account.",
+        footer=footer,
+    )
+    await _send(to, subject, text, html)
+
+
+async def send_password_reset_email(to: str, code: str, minutes_valid: int) -> None:
+    """The password-reset code."""
+    subject = f"{code} is your {BRAND} password reset code"
+    # Worth stating plainly: this mail is the only warning an account owner gets
+    # that someone is trying to take the account over.
+    footer = (
+        "If you didn't ask to reset your password, ignore this email — "
+        "your password has not changed."
+    )
+    text = (
+        f"Your {BRAND} password reset code is {code}.\n\n"
+        f"It expires in {minutes_valid} minutes.\n\n{footer}"
+    )
+    html = _otp_html(
+        code,
+        minutes_valid,
+        heading="Reset your password",
+        intro=f"Enter this code in {BRAND} to choose a new password.",
+        footer=footer,
+    )
+    await _send(to, subject, text, html)
