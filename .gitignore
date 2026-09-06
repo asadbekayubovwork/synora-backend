@@ -17,3 +17,6 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+
+# Server logs
+*.log
