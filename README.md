@@ -217,6 +217,57 @@ app/
     └── v1/auth.py       The routes
 ```
 
+## Deployment
+
+Live at **https://back.synora-ai.uz** — Swagger at `/docs`.
+
+The box at `169.58.183.151` hosts several unrelated projects, so this deploy
+stays in its own lane:
+
+| | |
+| --- | --- |
+| Code | `/opt/synora-backend` (venv at `.venv`, database in `data/`) |
+| Service | `synora-api.service`, running as the `synora` system user |
+| Port | `127.0.0.1:8010` — **8000 belongs to the online-talim container** |
+| nginx | `/etc/nginx/sites-available/back.synora-ai.uz.conf` |
+| TLS | Let's Encrypt, auto-renewing |
+
+The port is bound to loopback only; nginx is the sole way in, and ufw allows
+just SSH, 80 and 443.
+
+```bash
+systemctl status synora-api          # is it up
+journalctl -u synora-api -f          # live logs
+systemctl restart synora-api         # after an .env or code change
+```
+
+### Shipping a new version
+
+```bash
+# from the project root, on your machine
+tar --exclude='.venv' --exclude='__pycache__' --exclude='*.db' --exclude='.env' \
+    -czf /tmp/synora.tar.gz app requirements.txt
+
+scp /tmp/synora.tar.gz root@169.58.183.151:/tmp/
+ssh root@169.58.183.151 '
+  tar -xzf /tmp/synora.tar.gz -C /opt/synora-backend
+  /opt/synora-backend/.venv/bin/pip install -r /opt/synora-backend/requirements.txt -q
+  chown -R synora:synora /opt/synora-backend
+  systemctl restart synora-api'
+```
+
+The server's `.env` is *not* in that archive and is never overwritten by a
+deploy — it holds the production `JWT_SECRET`, and replacing it would sign out
+every user at once.
+
+### Still to do
+
+- **Back up `data/synora.db`.** Nothing copies it anywhere yet; losing the disk
+  loses every account.
+- **One worker only**, because SQLite serialises writers. Adding workers means
+  moving to Postgres first — and Postgres means Alembic, since `init_db()` only
+  creates missing tables.
+
 ## Notes for production
 
 - **Migrations.** `init_db()` only creates missing tables; it will not alter
