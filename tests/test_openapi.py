@@ -9,6 +9,13 @@ PATHS = [
     "/api/v1/auth/login",
     "/api/v1/auth/refresh",
     "/api/v1/auth/me",
+    "/api/v1/auth/oauth/providers",
+    "/api/v1/auth/oauth/accounts",
+    "/api/v1/auth/oauth/{provider}/authorize",
+    "/api/v1/auth/oauth/{provider}/callback",
+    "/api/v1/auth/oauth/{provider}/link",
+    "/api/v1/auth/oauth/telegram/callback",
+    "/api/v1/auth/oauth/telegram/link",
 ]
 
 

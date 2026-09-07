@@ -115,9 +115,17 @@ class ResetPasswordRequest(_Schema):
 
 class UserResponse(_Schema):
     id: uuid.UUID
-    email: EmailStr
+    # Null only for an account created through a provider that gives us no
+    # address — Telegram is the one that does that.
+    email: EmailStr | None = None
+    full_name: str | None = None
+    avatar_url: str | None = None
     is_verified: bool
     is_active: bool
+    has_password: bool = Field(
+        default=True,
+        description="False for a provider-only account, which cannot use `/auth/login`.",
+    )
     created_at: datetime
 
     @field_validator("created_at")

@@ -66,6 +66,18 @@ class TooManyRequestsError(AppError):
         self.retry_after = retry_after
 
 
+class BadGatewayError(AppError):
+    """A provider we depend on was unreachable or answered with nonsense."""
+
+    def __init__(self, message: str, code: str = "bad_gateway") -> None:
+        super().__init__(message, status.HTTP_502_BAD_GATEWAY, code)
+
+
+class ServiceUnavailableError(AppError):
+    def __init__(self, message: str, code: str = "service_unavailable") -> None:
+        super().__init__(message, status.HTTP_503_SERVICE_UNAVAILABLE, code)
+
+
 def _body(message: str, code: str, **extra: Any) -> dict[str, Any]:
     return {"detail": message, "statusMessage": message, "code": code, **extra}
 
