@@ -349,6 +349,8 @@ app/
     └── v1/
         ├── auth.py      Email + password routes
         └── oauth.py     Provider routes
+
+deploy/                  Release script, systemd unit, one-time server setup
 ```
 
 ## Deployment
@@ -377,22 +379,27 @@ systemctl restart synora-api         # after an .env or code change
 
 ### Shipping a new version
 
-```bash
-# from the project root, on your machine
-tar --exclude='.venv' --exclude='__pycache__' --exclude='*.db' --exclude='.env' \
-    -czf /tmp/synora.tar.gz app requirements.txt
+**Push to `main`.** [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)
+runs the test suite and, only if it is green, SSHes in as the `deploy` user and
+releases that commit. `/opt/synora-backend` is itself the checkout systemd runs,
+so a release is `git reset --hard <sha>`, `pip install -r requirements.txt`,
+restart, and a health check on `127.0.0.1:8010/health` — which, if it fails,
+puts the previous commit back before the run is marked failed.
 
-scp /tmp/synora.tar.gz root@169.58.183.151:/tmp/
-ssh root@169.58.183.151 '
-  tar -xzf /tmp/synora.tar.gz -C /opt/synora-backend
-  /opt/synora-backend/.venv/bin/pip install -r /opt/synora-backend/requirements.txt -q
-  chown -R synora:synora /opt/synora-backend
-  systemctl restart synora-api'
+The same script deploys by hand, so the two paths cannot drift:
+
+```bash
+ssh deploy@169.58.183.151 /usr/local/sbin/synora-api-deploy       # deploy main
+ssh deploy@169.58.183.151 'DEPLOY_REF=<sha> /usr/local/sbin/synora-api-deploy'
 ```
 
-The server's `.env` is *not* in that archive and is never overwritten by a
-deploy — it holds the production `JWT_SECRET`, and replacing it would sign out
-every user at once.
+The server's `.env` and `data/` are gitignored, and the release runs `git clean`
+without `-x`, so neither is ever touched — `.env` holds the production
+`JWT_SECRET`, and replacing it would sign out every user at once.
+
+[`deploy/`](deploy/) holds the release script, the unit file and the one-time
+server setup; [`deploy/README.md`](deploy/README.md) is the full write-up,
+including the `DEPLOY_SSH_KEY` secret the workflow needs.
 
 ### Still to do
 

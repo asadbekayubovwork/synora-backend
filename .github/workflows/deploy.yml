@@ -1,0 +1,67 @@
+name: Deploy to production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time; queue pushes instead of racing them onto the server.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  # A Python app has no build step to fail, so the suite is the gate: nothing
+  # reaches back.synora-ai.uz that cannot pass it.
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r requirements-dev.txt
+
+      # conftest.py sets its own environment, so there is no .env to provide.
+      - run: pytest -q
+
+  deploy:
+    name: Release on back.synora-ai.uz
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Pinned host key — fails closed if the server identity ever changes.
+          cat > ~/.ssh/known_hosts <<'EOF'
+          169.58.183.151 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH2DulFK0JmQIL/mB46RuBM3nQB9Y44W+4IZzsZCU3L/
+          EOF
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy ${{ github.sha }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes deploy@169.58.183.151 \
+            "DEPLOY_REF=${{ github.sha }} /usr/local/sbin/synora-api-deploy"
+
+      # The deploy script already health-checks the release and rolls back on
+      # failure, so this is a public-edge report only and never fails the run.
+      - name: Report public URL status
+        continue-on-error: true
+        run: |
+          for url in https://back.synora-ai.uz/health https://back.synora-ai.uz/docs; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 "$url" || echo "unreachable")
+            echo "$url -> $code"
+          done

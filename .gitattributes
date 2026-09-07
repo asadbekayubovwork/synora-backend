@@ -1,0 +1,5 @@
+# Server-side files must keep LF regardless of the checkout platform —
+# a shell script with CRLF will not run on Linux.
+*.sh            text eol=lf
+*.service       text eol=lf
+*.yml           text eol=lf
