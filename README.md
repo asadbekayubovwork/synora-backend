@@ -51,6 +51,13 @@ All under `/api/v1`.
 | `POST` | `/auth/forgot-password`  | Reset step 1 — mails a code, and doubles as the resend |
 | `POST` | `/auth/verify-reset-otp` | Reset step 2 — code → `reset_token` |
 | `POST` | `/auth/reset-password`   | Reset step 3 — sets the new password |
+| `GET`  | `/auth/oauth/providers` | Which providers this server has credentials for |
+| `GET`  | `/auth/oauth/{provider}/authorize` | Consent URL for Google / GitHub |
+| `POST` | `/auth/oauth/{provider}/callback`  | `code` + `state` → tokens |
+| `POST` | `/auth/oauth/telegram/callback`    | Login-widget payload → tokens |
+| `GET`  | `/auth/oauth/accounts` | Providers linked to the signed-in account |
+| `POST` | `/auth/oauth/{provider}/link` | Add a provider to the signed-in account |
+| `DELETE` | `/auth/oauth/{provider}/link` | Remove one |
 | `GET`  | `/health`           | Liveness probe |
 
 ### The registration flow
@@ -101,6 +108,79 @@ Two things this flow deliberately does **not** do:
 - **Step 2 still leaks a little.** A wrong code answers `otp_invalid` only when
   a code was really issued, and `otp_not_found` otherwise. Closing that means
   storing decoy codes for addresses nobody registered.
+
+### Signing in with a provider
+
+Google and GitHub use the ordinary authorization-code flow, with the exchange
+done here rather than in the browser — the client secret never leaves the
+server. The frontend's own route is the `redirect_uri`, so the code comes back
+to the page and is posted to the API.
+
+```bash
+# 1. Ask where to send the browser. redirect_uri defaults to the first
+#    OAUTH_REDIRECT_URIS entry; anything else must match one exactly.
+curl "$API/auth/oauth/google/authorize"
+# → 200 {"provider":"google","authorization_url":"https://accounts.google.com/…",
+#        "state":"eyJ…","redirect_uri":"http://localhost:3000/auth/callback",
+#        "expires_in":600}
+
+# 2. The user consents, Google redirects to
+#    http://localhost:3000/auth/callback?code=…&state=…
+#    Post both back, unchanged:
+curl -X POST "$API/auth/oauth/google/callback" \
+     -H 'Content-Type: application/json' \
+     -d '{"code":"4/0Aean…","state":"eyJ…"}'
+# → 200 the same {"access_token":…,"refresh_token":…,"user":{…}} as /auth/login
+```
+
+`state` is a short-lived signed token, not a database row: it carries the
+provider and the redirect URI, so a code cannot be replayed against a
+different provider or bounced to another page, and there is nothing to sweep.
+
+**Telegram has no OAuth server.** Its login widget authenticates the user
+inside Telegram and hands the browser a small profile object signed with
+`HMAC-SHA256(sha256(bot_token), …)`. Verifying that signature *is* the
+authentication, so there is no `/authorize` step — render the widget for
+`bot_username` and post what it gives you, every field included, since the
+signature covers all of them:
+
+```bash
+curl -X POST "$API/auth/oauth/telegram/callback" \
+     -H 'Content-Type: application/json' \
+     -d '{"id":987654321,"first_name":"Ali","username":"ali",
+          "auth_date":1735689600,"hash":"a3f1…"}'
+```
+
+Payloads older than `TELEGRAM_AUTH_TTL_SECONDS` are refused, so one captured
+from a browser does not work forever.
+
+#### Which account you land on
+
+1. **A provider account already linked** signs in as its owner. The match is on
+   the provider's account id, so changing the email on Google's side keeps the
+   same Synora account.
+2. **A verified provider email** joins the account that holds that address —
+   register with a password today, use Google tomorrow, one account. The
+   provider has proved control of the mailbox, which is what our own OTP
+   proves, so this is a link and not a takeover.
+3. **Otherwise** an account is created, with no password.
+
+An *unverified* provider email is refused (`oauth_email_unverified`) rather
+than used, since anyone can type someone else's address into a throwaway
+profile. One case worth knowing: if a provider email matches a signup that
+never verified, that row is claimed **and its password is discarded** — it was
+chosen by someone who never proved they could read the mailbox, and leaving it
+in place would hand them the account.
+
+An account with no password answers `403 password_login_unavailable` on
+`/auth/login`, naming the providers it does use. `POST /auth/forgot-password`
+works for it as a "set a first password" flow, as long as it has an email —
+a Telegram-only account has neither, and Telegram stays its only way in. That
+is also why unlinking the last provider from a password-less account is refused
+with `oauth_last_login_method`.
+
+`GET /auth/oauth/providers` lists only the providers this deployment has
+credentials for, so the frontend can render exactly the buttons that work.
 
 ### Errors
 
@@ -210,6 +290,13 @@ Everything lives in `.env`; see [.env.example](.env.example) for the full list.
 | `ACCESS_TOKEN_TTL_MINUTES` | `30` | |
 | `REFRESH_TOKEN_TTL_DAYS` | `30` | |
 | `OTP_TTL_MINUTES` | `10` | |
+| `OAUTH_REDIRECT_URIS` | `http://localhost:3000/auth/callback` | Comma separated, matched exactly; first is the default |
+| `OAUTH_STATE_TTL_MINUTES` | `10` | How long a sign-in may sit mid-flow |
+| `GOOGLE_CLIENT_ID` / `_SECRET` | unset | Unset ⇒ Google is absent from `/auth/oauth/providers` |
+| `GITHUB_CLIENT_ID` / `_SECRET` | unset | Same |
+| `TELEGRAM_BOT_TOKEN` | unset | Also the widget's verification key — guard it like `JWT_SECRET` |
+| `TELEGRAM_BOT_USERNAME` | unset | Only for rendering the widget |
+| `TELEGRAM_AUTH_TTL_SECONDS` | `86400` | How old a widget payload may be |
 | `OTP_MAX_ATTEMPTS` | `5` | Wrong guesses before the code is discarded |
 | `OTP_RESEND_COOLDOWN_SECONDS` | `60` | Matches the frontend's resend timer |
 | `EXPOSE_DEV_OTP` | `true` | Ignored unless `ENVIRONMENT=development` |
@@ -217,9 +304,14 @@ Everything lives in `.env`; see [.env.example](.env.example) for the full list.
 | `CORS_ORIGINS` | `http://localhost:3000,…` | Comma separated |
 
 Outside `ENVIRONMENT=development` the app refuses to start if `JWT_SECRET` is
-still the default or shorter than 32 bytes, or if `CORS_ORIGINS` is `*` —
-signing tokens with a guessable secret lets anyone mint a session. Generate one
-with `openssl rand -hex 32`.
+still the default or shorter than 32 bytes, if `CORS_ORIGINS` is `*`, if a
+provider has an id but no secret (the button would appear and then fail), or if
+`OAUTH_REDIRECT_URIS` allows any target — signing tokens with a guessable
+secret lets anyone mint a session, and an open redirect list turns a leaked
+client id into a code thief. Generate a secret with `openssl rand -hex 32`.
+
+Where the provider credentials come from is written up in
+[.env.example](.env.example), next to each block.
 
 ## Tests
 
@@ -228,8 +320,11 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-28 tests cover both registration steps, the resend cooldown, the attempt cap,
-login, token handling and the OpenAPI schema.
+77 tests cover both registration steps, the resend cooldown, the attempt cap,
+login, token handling, the password reset, the three OAuth providers
+(signature checks and account matching included) and the OpenAPI schema. The
+provider round-trips are stubbed at `identity_from_code`, so the suite needs no
+network and no real credentials.
 
 ## Layout
 
@@ -241,12 +336,19 @@ app/
 │   ├── security.py      bcrypt, OTP generation, JWT
 │   └── exceptions.py    Typed errors + the shared error body
 ├── db/                  Declarative base and the async session
-├── models/              User, OtpCode
+├── models/              User, OtpCode, OAuthAccount
 ├── schemas/             Request/response models (also the Swagger examples)
-├── services/            register / verify / login, OTP lifecycle, mailer
+├── services/
+│   ├── auth_service.py  register / verify / login / password reset
+│   ├── otp_service.py   Code lifecycle
+│   ├── mailer.py        SMTP
+│   ├── oauth_service.py Provider identity -> user, linking, unlinking
+│   └── oauth/           One module per provider, behind one interface
 └── api/
     ├── deps.py          Session and bearer-token dependencies
-    └── v1/auth.py       The routes
+    └── v1/
+        ├── auth.py      Email + password routes
+        └── oauth.py     Provider routes
 ```
 
 ## Deployment
@@ -304,8 +406,19 @@ every user at once.
 
 - **Migrations.** `init_db()` only creates missing tables; it will not alter
   existing ones. Add Alembic before the schema changes under real data.
+  **This applies to the OAuth work:** `users.email` and `users.password_hash`
+  became nullable and `full_name` / `avatar_url` were added, and an existing
+  database will not pick any of that up. On the current SQLite deploy the
+  quickest honest fix is to recreate `data/synora.db` (it holds test accounts
+  only); with real data, write the `ALTER TABLE`s first.
 - **Refresh tokens are stateless.** They stay valid until they expire — there is
   no revocation list, so "log out everywhere" needs a stored token id or a
   per-user token version.
+- **OAuth tokens are not kept.** The provider's access token is used once, to
+  read the profile, and then dropped — nothing here calls Google or GitHub on
+  the user's behalf later. Add refresh-token storage only if that changes.
+- **A Telegram-only account has no email**, so `user.email` is `null` in every
+  response. Nothing yet lets such a user add one; that is the missing piece
+  before they can receive any mail from us.
 - **Rate limiting** covers OTP issuance only. Login is not throttled; put a
   limiter (nginx, Redis) in front of it before going public.

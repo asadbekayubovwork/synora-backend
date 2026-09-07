@@ -14,7 +14,7 @@ import jwt
 
 from app.core.config import settings
 
-TokenType = Literal["access", "refresh", "password_reset"]
+TokenType = Literal["access", "refresh", "password_reset", "oauth_state"]
 
 # bcrypt hashes at most 72 bytes and raises on anything longer (4.2+), so long
 # passphrases are folded to a fixed-width digest first. Base64 keeps the digest
@@ -63,7 +63,12 @@ def verify_otp(code: str, code_hash: str) -> bool:
 # --- JWT -------------------------------------------------------------------
 
 
-def _create_token(subject: str, token_type: TokenType, expires_delta: timedelta) -> str:
+def _create_token(
+    subject: str,
+    token_type: TokenType,
+    expires_delta: timedelta,
+    extra: dict[str, Any] | None = None,
+) -> str:
     now = datetime.now(UTC)
     payload: dict[str, Any] = {
         "sub": subject,
@@ -72,6 +77,8 @@ def _create_token(subject: str, token_type: TokenType, expires_delta: timedelta)
         "exp": int((now + expires_delta).timestamp()),
         "jti": str(uuid.uuid4()),
     }
+    if extra:
+        payload.update(extra)
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
@@ -83,12 +90,16 @@ def create_refresh_token(subject: str) -> str:
     return _create_token(subject, "refresh", timedelta(days=settings.refresh_token_ttl_days))
 
 
-def _password_fingerprint(password_hash: str) -> str:
-    """A short digest of the stored hash, used to tie a reset token to it."""
-    return hashlib.sha256(password_hash.encode("utf-8")).hexdigest()[:16]
+def _password_fingerprint(password_hash: str | None) -> str:
+    """A short digest of the stored hash, used to tie a reset token to it.
+
+    `None` — an account that only ever signed in through a provider — has a
+    fingerprint of its own, so "set a first password" is single-use too.
+    """
+    return hashlib.sha256((password_hash or "").encode("utf-8")).hexdigest()[:16]
 
 
-def create_reset_token(subject: str, password_hash: str) -> str:
+def create_reset_token(subject: str, password_hash: str | None) -> str:
     """Proof that the reset code was verified, for the final step to present.
 
     The current password hash is baked in, which makes the token single-use for
@@ -107,9 +118,34 @@ def create_reset_token(subject: str, password_hash: str) -> str:
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
-def reset_token_matches_password(payload: dict[str, Any], password_hash: str) -> bool:
+def reset_token_matches_password(payload: dict[str, Any], password_hash: str | None) -> bool:
     return hmac.compare_digest(
         str(payload.get("pwh", "")), _password_fingerprint(password_hash)
+    )
+
+
+# --- OAuth state -----------------------------------------------------------
+
+
+def create_oauth_state(
+    provider: str,
+    redirect_uri: str,
+    link_user_id: str | None = None,
+) -> str:
+    """Signed proof that a callback answers an authorization we started.
+
+    Stateless like the reset token — there is no table to keep or sweep. The
+    subject is a fresh nonce so parallel sign-ins never collide, and the
+    provider and redirect URI are baked in, so a code cannot be replayed
+    against a different provider or bounced to another page. `link_user_id`
+    marks a state that may only add a provider to an existing account, never
+    open a session.
+    """
+    return _create_token(
+        secrets.token_urlsafe(16),
+        "oauth_state",
+        timedelta(minutes=settings.oauth_state_ttl_minutes),
+        extra={"prv": provider, "rdu": redirect_uri, "lnk": link_user_id},
     )
 
 

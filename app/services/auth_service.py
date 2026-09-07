@@ -30,8 +30,10 @@ from app.core.security import (
     verify_password,
 )
 from app.db.base import utcnow
+from app.models.oauth import OAuthAccount
 from app.models.otp import OtpPurpose
 from app.models.user import User, normalize_email
+from app.services.oauth.registry import label_for
 from app.services.otp_service import IssuedOtp, consume_otp, discard_codes, issue_otp
 
 # Compared against when no user matches, so a missing address and a wrong
@@ -51,7 +53,8 @@ class AuthTokens:
     user: User
 
 
-def _issue_tokens(user: User) -> AuthTokens:
+def issue_tokens(user: User) -> AuthTokens:
+    """Public because `oauth_service` signs users in through the same door."""
     subject = str(user.id)
     return AuthTokens(
         access_token=create_access_token(subject),
@@ -119,7 +122,7 @@ async def verify_registration_otp(session: AsyncSession, email: str, code: str) 
     user.verified_at = now
     user.last_login_at = now
 
-    tokens = _issue_tokens(user)
+    tokens = issue_tokens(user)
     await session.commit()
     return tokens
 
@@ -151,6 +154,18 @@ async def login(session: AsyncSession, email: str, password: str) -> AuthTokens:
         verify_password(password, _DUMMY_HASH)
         raise UnauthorizedError(_INVALID_CREDENTIALS, code="invalid_credentials")
 
+    if user.password_hash is None:
+        # A provider-only account. Naming the providers is no new leak — the
+        # register endpoint already answers 409 for an address that has an
+        # account — and without it the user is stuck guessing a password that
+        # was never set.
+        verify_password(password, _DUMMY_HASH)
+        raise ForbiddenError(
+            f"This account signs in with {await _login_methods(session, user)}. "
+            "Use that, or set a password with 'Forgot password'.",
+            code="password_login_unavailable",
+        )
+
     if not verify_password(password, user.password_hash):
         raise UnauthorizedError(_INVALID_CREDENTIALS, code="invalid_credentials")
 
@@ -166,16 +181,29 @@ async def login(session: AsyncSession, email: str, password: str) -> AuthTokens:
         raise ForbiddenError("This account has been disabled.", code="account_disabled")
 
     user.last_login_at = utcnow()
-    tokens = _issue_tokens(user)
+    tokens = issue_tokens(user)
     await session.commit()
     return tokens
+
+
+async def _login_methods(session: AsyncSession, user: User) -> str:
+    """Reads as `Google`, or `Google or GitHub` — for the message above."""
+    providers = (
+        await session.execute(
+            select(OAuthAccount.provider)
+            .where(OAuthAccount.user_id == user.id)
+            .order_by(OAuthAccount.created_at)
+        )
+    ).scalars()
+    labels = [label_for(provider) for provider in providers]
+    return " or ".join(labels) if labels else "a linked account"
 
 
 # --- Refresh ---------------------------------------------------------------
 
 
 async def refresh_tokens(session: AsyncSession, user: User) -> AuthTokens:
-    tokens = _issue_tokens(user)
+    tokens = issue_tokens(user)
     await session.commit()
     return tokens
 

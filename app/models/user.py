@@ -11,9 +11,19 @@ from app.db.base import Base
 class User(Base):
     __tablename__ = "users"
 
-    # Always stored lowercase — `normalize_email` is the only way in.
-    email: Mapped[str] = mapped_column(String(320), unique=True, index=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Always stored lowercase — `normalize_email` is the only way in. Null for
+    # an account created through a provider that gives us no address: Telegram
+    # hands back a numeric id and nothing else.
+    email: Mapped[str | None] = mapped_column(String(320), unique=True, index=True, nullable=True)
+
+    # Null for an account that has only ever signed in through a provider.
+    # Clients branch on `has_password`, not on this.
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Both filled from the provider profile when we learn them, and never
+    # overwritten once set — the user's own edit outranks the provider's copy.
+    full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     # False until the registration OTP is verified; such a row is a pending
     # signup, not an account, and cannot log in.
@@ -22,6 +32,11 @@ class User(Base):
 
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @property
+    def has_password(self) -> bool:
+        """False for a provider-only account, which cannot use `/auth/login`."""
+        return bool(self.password_hash)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<User {self.email} verified={self.is_verified}>"

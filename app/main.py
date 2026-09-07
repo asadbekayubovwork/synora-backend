@@ -10,6 +10,7 @@ from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.db.session import close_db, init_db
+from app.services.oauth import configured_providers
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
@@ -33,6 +34,21 @@ Authentication for **Synora AI**.
 
 `POST /auth/resend-otp` issues a new code between the two steps.
 
+### Or sign in with a provider
+
+`GET /auth/oauth/providers` lists what this server has credentials for.
+
+* **Google, GitHub** — `GET /auth/oauth/{provider}/authorize` returns a consent
+  URL; the redirect comes back with `code` and `state`, and
+  `POST /auth/oauth/{provider}/callback` turns those into the same token pair.
+* **Telegram** — no redirect: render the login widget and post what it gives
+  you to `POST /auth/oauth/telegram/callback`.
+
+A verified provider email joins the account that already holds it, so signing
+up with a password and later using Google lands on one account. An account
+created through a provider has no password (`has_password: false`) and, for
+Telegram, no email either.
+
 ### Tokens
 
 `login`, `verify-otp` and `refresh` all return an `access_token` (short-lived)
@@ -48,6 +64,7 @@ branch on.
 
 TAGS = [
     {"name": "Auth", "description": "Registration, email verification and sign-in."},
+    {"name": "OAuth", "description": "Sign in with Google, GitHub or Telegram, and link providers."},
     {"name": "Health", "description": "Liveness probe."},
 ]
 
@@ -62,6 +79,9 @@ async def lifespan(_: FastAPI):
         logger.warning("EXPOSE_DEV_OTP is on: verification codes are returned in API responses.")
     if not settings.smtp_host:
         logger.warning("SMTP is not configured: verification codes are printed to this console.")
+
+    enabled = [provider.label for provider in configured_providers()]
+    logger.info("OAuth providers: %s", ", ".join(enabled) if enabled else "none configured")
     yield
     await close_db()
 

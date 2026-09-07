@@ -35,6 +35,29 @@ class Settings(BaseSettings):
     otp_max_attempts: int = 5
     otp_resend_cooldown_seconds: int = 60
 
+    # --- OAuth -------------------------------------------------------------
+    # How long a sign-in may sit between `/authorize` and `/callback`.
+    oauth_state_ttl_minutes: int = 10
+    # Exact-match allowlist for the `redirect_uri` a client may ask for. Without
+    # it a stolen client id could point the provider at an attacker's page and
+    # collect authorization codes there. The first entry is the default.
+    oauth_redirect_uris: str = "http://localhost:3000/auth/callback"
+    oauth_http_timeout_seconds: float = 15.0
+
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+
+    github_client_id: str | None = None
+    github_client_secret: str | None = None
+
+    # The widget signs its payload with sha256(bot_token), so the token is both
+    # the credential and the verification key.
+    telegram_bot_token: str | None = None
+    # Only needed to render the widget; the frontend reads it from
+    # `GET /auth/oauth/providers`.
+    telegram_bot_username: str | None = None
+    telegram_auth_ttl_seconds: int = 86400
+
     # --- Mail --------------------------------------------------------------
     smtp_host: str | None = None
     smtp_port: int = 587
@@ -60,6 +83,10 @@ class Settings(BaseSettings):
         return self.expose_dev_otp and self.is_development
 
     @property
+    def oauth_redirect_uri_list(self) -> list[str]:
+        return [uri.strip() for uri in self.oauth_redirect_uris.split(",") if uri.strip()]
+
+    @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
@@ -79,6 +106,17 @@ class Settings(BaseSettings):
             problems.append("JWT_SECRET is shorter than 32 bytes")
         if "*" in self.cors_origin_list:
             problems.append("CORS_ORIGINS allows any origin")
+
+        # Half-configured providers are worse than absent ones: the button
+        # appears and then fails at the token exchange.
+        for provider, client_id, secret in (
+            ("GOOGLE", self.google_client_id, self.google_client_secret),
+            ("GITHUB", self.github_client_id, self.github_client_secret),
+        ):
+            if bool(client_id) != bool(secret):
+                problems.append(f"{provider}_CLIENT_ID and {provider}_CLIENT_SECRET must be set together")
+        if any(uri == "*" for uri in self.oauth_redirect_uri_list):
+            problems.append("OAUTH_REDIRECT_URIS allows any redirect target")
 
         if problems:
             raise RuntimeError(
