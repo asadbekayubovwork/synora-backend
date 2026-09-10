@@ -99,6 +99,7 @@ def open_metrics(monkeypatch):
     """No token, which is what a development box runs with."""
     monkeypatch.setattr(settings, "metrics_enabled", True)
     monkeypatch.setattr(settings, "metrics_token", "")
+    monkeypatch.setattr(settings, "environment", "development")
 
 
 # The `client` fixture is based at `/api/v1`, and `/metrics` deliberately is
@@ -125,6 +126,7 @@ async def test_the_exposition_is_prometheus_text_not_json(client, open_metrics):
 
 
 async def test_a_token_is_required_once_one_is_configured(client, monkeypatch):
+    """Configured, it is enforced — in development too, where none is needed."""
     monkeypatch.setattr(settings, "metrics_token", "s3cret-scrape-token")
 
     assert (await client.get(METRICS_URL)).status_code == 401
@@ -146,6 +148,55 @@ async def test_a_disabled_endpoint_looks_like_one_that_was_never_built(
     # 404 rather than 503: a probe learns nothing from the difference.
     assert response.status_code == 404
     assert response.json()["code"] == "not_found"
+
+
+async def test_without_a_token_outside_development_it_is_simply_absent(
+    client, monkeypatch
+):
+    """The case that decides whether a release survives.
+
+    `METRICS_TOKEN` is a new variable, so no deployed `.env` has one. The
+    first version of this refused to boot without it, which would have failed
+    a production release that changed nothing else — an observability feature
+    taking down the API it observes. Missing configuration turns the endpoint
+    off instead, and the startup log says why.
+    """
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.setattr(settings, "metrics_token", "")
+    monkeypatch.setattr(settings, "metrics_enabled", True)
+
+    response = await client.get(METRICS_URL)
+
+    assert response.status_code == 404
+    assert "not served" in settings.metrics_status
+
+    # ...and the rest of the API is untouched by that, which is the point.
+    assert (await client.get("http://test/health")).status_code == 200
+
+
+async def test_a_second_worker_turns_it_off_rather_than_reporting_a_fraction(
+    client, monkeypatch
+):
+    """One registry per process, and Prometheus scrapes whichever one it gets."""
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.setattr(settings, "metrics_token", "s3cret-scrape-token")
+    monkeypatch.setattr(settings, "worker_count", 2)
+
+    response = await client.get(METRICS_URL, headers=auth("s3cret-scrape-token"))
+
+    assert response.status_code == 404
+    assert "WORKER_COUNT" in settings.metrics_status
+
+
+async def test_a_token_outside_development_is_all_it_takes(client, monkeypatch):
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.setattr(settings, "metrics_token", "s3cret-scrape-token")
+    monkeypatch.setattr(settings, "metrics_enabled", True)
+
+    assert (await client.get(METRICS_URL)).status_code == 401
+    right = await client.get(METRICS_URL, headers=auth("s3cret-scrape-token"))
+    assert right.status_code == 200
+    assert "synora_http_requests_total" in right.text
 
 
 async def test_the_scrape_does_not_count_itself(client, open_metrics):

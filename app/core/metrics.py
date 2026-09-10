@@ -31,8 +31,8 @@ would mean two registries, and Prometheus scraping one of them at random —
 counters that halve and then double as the reverse proxy picks a socket. If
 `WORKER_COUNT` ever goes up, this module needs
 `prometheus_client.multiprocess` and a shared directory, and that is a bigger
-change than adding a flag: `assert_production_ready` refuses the combination
-instead of letting it produce plausible nonsense.
+change than adding a flag — so until then `settings.serves_metrics` switches
+the endpoint off rather than let it produce plausible nonsense.
 
 ## Gauges that only the database knows
 
@@ -45,10 +45,12 @@ hold and release counters — is wrong the first time a process restarts mid
 stream. `METRICS_DB_GAUGES=false` turns them off for a deployment that would
 rather not pay even that.
 
-Recording is unconditional; only exposure is gated by `METRICS_ENABLED`. An
-incremented counter nobody scrapes costs a dictionary lookup, and a switch that
-silences the call sites as well is a switch that makes a metrics bug look like
-an application bug.
+Recording is unconditional; only exposure is gated, by
+`settings.serves_metrics`. An incremented counter nobody scrapes costs a
+dictionary lookup, and a switch that silences the call sites as well is a
+switch that makes a metrics bug look like an application bug. Nothing in this
+module can refuse a boot either: a deployment with no `METRICS_TOKEN` serves
+customers exactly as before and answers 404 here.
 """
 
 from __future__ import annotations

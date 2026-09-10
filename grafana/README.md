@@ -49,10 +49,18 @@ ishga tushganda ham saqlanadi va satrlar yig'indisi bo'ladi, shuning uchun
 
 ## Ishlab chiqarishda
 
-1. `METRICS_TOKEN` ni o'rnating — `assert_production_ready` usiz boot qilmaydi.
+1. `METRICS_TOKEN` ni o'rnating — usiz `/metrics` development'dan tashqarida
+   `404` qaytaradi va startup logida sababi yoziladi:
+
+   ```
+   synora: Metrics: not served (set METRICS_TOKEN; /metrics answers 404 without one)
+   ```
+
    Sabab nginx: API `location /` orqali proksilanadi, ya'ni qo'shilgan route
    paydo bo'lishi bilanoq ochiq, `/metrics` esa chaqiruvlar hajmini, kredit
-   harakatini va mijozlar sonini e'lon qiladi.
+   harakatini va mijozlar sonini e'lon qiladi. Bu boot xatosi emas — ataylab:
+   dashboard hech qachon o'zi kuzatayotgan API'ning relizini yiqita olmasligi
+   kerak.
 2. `prometheus.yml` dagi `authorization` blokini oching va tokenni fayldan
    bering (repoga yozmang).
 3. Qo'shimcha qatlam sifatida nginx'da yopish ham arziydi:
@@ -61,8 +69,8 @@ ishga tushganda ham saqlanadi va satrlar yig'indisi bo'ladi, shuning uchun
    ```
 4. `--workers 1` bo'lib qolsin. Har bir jarayonning o'z registri bo'ladi va
    Prometheus proksi tanlagan bittasini scrape qiladi — natijada trafikning bir
-   qismini ko'rsatadigan grafik chiqadi. `assert_production_ready` bu
-   kombinatsiyani ham rad etadi.
+   qismini ko'rsatadigan grafik chiqadi. `WORKER_COUNT > 1` bo'lsa endpoint
+   o'zini o'chiradi (yana 404), ya'ni yolg'on grafik o'rniga hech nima.
 
 ## Dashboardni tahrirlash
 

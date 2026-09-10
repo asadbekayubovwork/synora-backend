@@ -203,6 +203,11 @@ async def lifespan(_: FastAPI):
         "Batch queue: %s",
         "RabbitMQ" if settings.has_broker else "not configured (batch jobs submit inline)",
     )
+    # The one place a switched-off scrape endpoint explains itself. The
+    # endpoint answers 404 rather than saying why, so without this line the
+    # symptom is a Prometheus target that has been down since a deploy and a
+    # dashboard nobody trusts.
+    logger.info("Metrics: %s", settings.metrics_status)
     yield
     # Shutdown is ordered by what each step still needs to be alive, and the
     # settlements go first. `tts_service` finishes a stream's billing in a
@@ -298,11 +303,16 @@ async def metrics(request: Request) -> Response:
 
     `METRICS_TOKEN` is compared with `compare_digest`: a `==` on a secret
     leaks its length and its first differing byte to anyone who can time the
-    two responses, and there is no reason to be the exception.
+    two responses, and there is no reason to be the exception. Without a token
+    outside development the endpoint is simply absent, which is the whole of
+    the protection and costs a deployment nothing when it is not configured.
     """
-    if not settings.metrics_enabled:
-        # 404 rather than 503: a disabled endpoint should look like an endpoint
-        # that was never built, so a scanner learns nothing from the difference.
+    if not settings.serves_metrics:
+        # 404 rather than 503, and the reason is on the startup log instead of
+        # in this response: an endpoint that is off should look like one that
+        # was never built, or a scanner learns that it exists and will start
+        # answering as soon as somebody configures it. `serves_metrics` is
+        # also why a missing token is not a boot failure — see the property.
         raise NotFoundError("Not found.", code="not_found")
 
     expected = settings.metrics_token.strip()

@@ -529,11 +529,19 @@ sessions, open batch jobs, balances — are read from the rows at scrape time by
 guess, and a floor that climbs across a quiet night is a hold that never came
 back.
 
-Two rules that boot-time checks enforce rather than document:
-`METRICS_TOKEN` is required outside development, because nginx proxies
-`location /` and the endpoint publishes call volumes and credit movements; and
-`METRICS_ENABLED` with `WORKER_COUNT > 1` is refused, because the registry is
-per-process and Prometheus would scrape whichever worker the proxy picked.
+Two things switch the endpoint off rather than configure it wrongly, and
+neither is a boot failure — a dashboard must not be able to fail a release of
+the API it watches. Outside development `/metrics` answers `404` until
+`METRICS_TOKEN` is set, because nginx proxies `location /` and the endpoint
+publishes call volumes and credit movements. `WORKER_COUNT > 1` switches it
+off too, because the registry is per-process and Prometheus would scrape
+whichever worker the proxy picked. The startup log names the reason in both
+cases:
+
+```
+synora: Metrics: not served (set METRICS_TOKEN; /metrics answers 404 without one)
+```
+
 Details in [grafana/README.md](grafana/README.md) and in the module docstring
 of `app/core/metrics.py`.
 
@@ -633,7 +641,7 @@ Everything lives in `.env`; see [.env.example](.env.example) for the full list.
 | `BILLING_HOLD_SECONDS` | `120` | How much of a realtime session to reserve up front |
 | `BILLING_ROLLUP_TIMEZONE` | `Asia/Tashkent` | Local day boundary for usage reports |
 | `TTS_BASE_URL` / `TTS_API_KEY` | unset | Unset ⇒ every `/tts` route answers `503`. One without the other is refused at boot. Full list in [docs/TTS.md](docs/TTS.md#configuration) |
-| `METRICS_ENABLED` / `METRICS_TOKEN` | `true` / unset | `GET /metrics`. A token is required outside development — nginx proxies `location /`, so the endpoint is public the moment it exists |
+| `METRICS_ENABLED` / `METRICS_TOKEN` | `true` / unset | `GET /metrics`. Outside development it answers `404` until a token is set — nginx proxies `location /`, so the endpoint is public the moment it exists |
 | `RABBITMQ_URL` | unset | Unset ⇒ batch jobs are submitted inline and polled when read. See [docs/QUEUEING.md](docs/QUEUEING.md) |
 | `RABBITMQ_PREFETCH` | `4` | Batch items in flight against the single GPU. A ceiling, not a throughput knob |
 

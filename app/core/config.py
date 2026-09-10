@@ -185,12 +185,12 @@ class Settings(BaseSettings):
     # only decides whether the endpoint answers, because a flag that also
     # silenced the counters would make a metrics bug look like an app bug.
     metrics_enabled: bool = True
-    # A bearer token for that endpoint, and outside development it is required.
-    # The reason is nginx: this API is reached through a `location /` proxy, so
+    # A bearer token for that endpoint. Empty is fine on a loopback dev box and
+    # nowhere else: this API is reached through an nginx `location /` proxy, so
     # a route we add is public the moment it exists, and this one reports call
-    # volumes, credit movements and customer counts. Empty means open, which is
-    # fine on a loopback dev box and is refused by
-    # `assert_production_ready` anywhere else.
+    # volumes, credit movements and customer counts. Rather than refuse the
+    # boot over it — see `serves_metrics` — an untokened deployment simply does
+    # not serve the endpoint.
     metrics_token: str = ""
     # The three aggregates `refresh_db_gauges` runs per scrape: held credit,
     # open sessions, open batch jobs. Nothing else can report those, and
@@ -222,6 +222,50 @@ class Settings(BaseSettings):
     @property
     def has_broker(self) -> bool:
         return bool(self.rabbitmq_url.strip())
+
+    @property
+    def serves_metrics(self) -> bool:
+        """Whether `GET /metrics` answers at all, and the two ways it will not.
+
+        Deliberately not a `assert_production_ready` refusal, which is what
+        this was first written as. That version would have failed the next
+        production release outright: `METRICS_TOKEN` is a new variable, no
+        deployed `.env` has one, and the boot check fires before anything else
+        — so a dashboard nobody had asked for yet would have taken down a
+        release that changed nothing else. An observability feature must not be
+        able to do that. Missing configuration turns the endpoint off and says
+        so in the startup log; it never stops the API from serving customers.
+
+        Silent to the outside either way, because the alternative advertises
+        it. A `503 metrics_disabled` tells a scanner there is a metrics
+        endpoint here and it will start answering once somebody configures it;
+        a 404 says nothing at all.
+        """
+        if not self.metrics_enabled:
+            return False
+        # No token outside development. Everything this endpoint publishes —
+        # request volumes, credits debited, how many wallets exist — is worth
+        # exactly one `curl` to a competitor, and Prometheus has supported
+        # bearer tokens for a decade.
+        if not self.metrics_token.strip() and not self.is_development:
+            return False
+        # One registry per process, and Prometheus scrapes whichever worker the
+        # proxy hands it — counters that halve and double at random are worse
+        # than none. See the module docstring of `app/core/metrics.py`.
+        return self.worker_count <= 1
+
+    @property
+    def metrics_status(self) -> str:
+        """One line for the startup log, naming the reason when it is off."""
+        if not self.metrics_enabled:
+            return "disabled (METRICS_ENABLED=false)"
+        if not self.metrics_token.strip() and not self.is_development:
+            return "not served (set METRICS_TOKEN; /metrics answers 404 without one)"
+        if self.worker_count > 1:
+            return "not served (WORKER_COUNT > 1 needs prometheus_client multiprocess mode)"
+        if self.metrics_token.strip():
+            return "/metrics, bearer token required"
+        return "/metrics, no token (development)"
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -280,24 +324,6 @@ class Settings(BaseSettings):
             problems.append(
                 "WORKER_COUNT > 1 requires REDIS_URL "
                 "(the background-job lease and the SSE fan-out both need it)"
-            )
-        # A metrics endpoint is reachable from the internet the moment nginx
-        # proxies `location /`, and it publishes exactly the numbers a
-        # competitor would like: request volumes, credits debited, how many
-        # wallets there are. Prometheus supports bearer tokens, so there is no
-        # deployment that needs this open.
-        if self.metrics_enabled and not self.metrics_token.strip():
-            problems.append(
-                "METRICS_TOKEN must be set (or METRICS_ENABLED=false): "
-                "/metrics is public behind an nginx `location /`"
-            )
-        # One registry per process, and Prometheus scrapes whichever worker the
-        # proxy picks. See the module docstring of `app/core/metrics.py`.
-        if self.metrics_enabled and self.worker_count > 1:
-            problems.append(
-                "METRICS_ENABLED with WORKER_COUNT > 1 needs "
-                "prometheus_client's multiprocess mode; the per-process "
-                "registries would report a fraction of the traffic"
             )
         if self.billing_grace_micros < 0 or self.billing_grace_seconds < 0:
             problems.append("BILLING_GRACE_* must not be negative")
