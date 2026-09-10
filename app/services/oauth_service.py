@@ -43,6 +43,7 @@ from app.models.oauth import OAuthAccount, OAuthProviderName
 from app.models.otp import OtpPurpose
 from app.models.user import User
 from app.services.auth_service import AuthTokens, get_user_by_email, issue_tokens
+from app.services.billing.wallet_service import grant_signup_bonus
 from app.services.oauth import (
     OAuthIdentity,
     get_provider,
@@ -225,6 +226,8 @@ async def sign_in(session: AsyncSession, identity: OAuthIdentity) -> AuthTokens:
         _fill_profile(user, identity)
         user.last_login_at = utcnow()
         tokens = issue_tokens(user)
+        # Idempotent, so an existing account simply gets its wallet ensured.
+        await grant_signup_bonus(session, user.id)
         await session.commit()
         return tokens
 
@@ -268,6 +271,7 @@ async def sign_in(session: AsyncSession, identity: OAuthIdentity) -> AuthTokens:
     session.add(_record(user.id, identity))
     user.last_login_at = now
     tokens = issue_tokens(user)
+    await grant_signup_bonus(session, user.id)
     await session.commit()
     return tokens
 

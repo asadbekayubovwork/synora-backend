@@ -34,6 +34,7 @@ from app.models.oauth import OAuthAccount
 from app.models.otp import OtpPurpose
 from app.models.user import User, normalize_email
 from app.services.oauth.registry import label_for
+from app.services.billing.wallet_service import grant_signup_bonus
 from app.services.otp_service import IssuedOtp, consume_otp, discard_codes, issue_otp
 
 # Compared against when no user matches, so a missing address and a wrong
@@ -123,6 +124,10 @@ async def verify_registration_otp(session: AsyncSession, email: str, code: str) 
     user.last_login_at = now
 
     tokens = issue_tokens(user)
+    # Creates the wallet and grants the welcome credit, both keyed so that
+    # calling this again can never grant twice — which is why it is safe to
+    # call unconditionally rather than tracking whether it already happened.
+    await grant_signup_bonus(session, user.id)
     await session.commit()
     return tokens
 
