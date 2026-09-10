@@ -1,0 +1,29 @@
+# One target: the API on the host. Everything else on this dashboard is derived
+# from what that process counts.
+global:
+  # Matched to the dashboard's `rate(...[1m])` windows: a 15s scrape gives four
+  # samples inside a one-minute rate, which is the minimum that is not noise.
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: synora-api
+    metrics_path: /metrics
+    static_configs:
+      # The port the API listens on. `deploy/synora-api.service` uses 8010 in
+      # production and `uvicorn --port 8000` is the local default; change this
+      # line rather than the app.
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          environment: development
+
+    # `METRICS_TOKEN` is empty on a development box, so no credentials are
+    # needed here. Set one — and `assert_production_ready` insists on one
+    # outside development — and uncomment this:
+    #
+    # authorization:
+    #   type: Bearer
+    #   credentials_file: /etc/prometheus/metrics_token
+    #
+    # ...with the file mounted into the container and kept out of git. A token
+    # written inline here is a secret in a repository.

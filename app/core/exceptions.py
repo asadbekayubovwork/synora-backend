@@ -14,6 +14,8 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.core import metrics
+
 
 class AppError(HTTPException):
     """Base for the errors this API raises deliberately."""
@@ -140,8 +142,15 @@ def _body(message: str, code: str, **extra: Any) -> dict[str, Any]:
 
 
 def register_exception_handlers(app: FastAPI) -> None:
+    # Counted here rather than in the metrics middleware, which sees a status
+    # and nothing else. `402` alone cannot tell "top up your balance" from
+    # "your card is frozen", and `503` cannot tell an unconfigured deployment
+    # from a rejected upstream key — but `code` names exactly one of them, and
+    # it is the same string the client branches on. Every value is a constant
+    # from this module or its callers, so the label set stays closed.
     @app.exception_handler(AppError)
     async def _app_error(_: Request, exc: AppError) -> JSONResponse:
+        metrics.record_api_error(code=exc.code, status=exc.status_code)
         return JSONResponse(
             status_code=exc.status_code,
             content=_body(str(exc.detail), exc.code, **exc.extra),
@@ -150,6 +159,7 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(HTTPException)
     async def _http_error(_: Request, exc: HTTPException) -> JSONResponse:
+        metrics.record_api_error(code="http_error", status=exc.status_code)
         return JSONResponse(
             status_code=exc.status_code,
             content=_body(str(exc.detail), "http_error"),
@@ -165,6 +175,9 @@ def register_exception_handlers(app: FastAPI) -> None:
         if field:
             message = f"{field}: {message}"
 
+        metrics.record_api_error(
+            code="validation_error", status=status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content=_body(

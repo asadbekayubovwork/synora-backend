@@ -140,6 +140,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.broker import RK_BATCH_SUBMIT, get_broker
+from app.core import metrics
 from app.core.config import settings
 from app.core.exceptions import (
     AppError,
@@ -1108,6 +1109,13 @@ async def settle_job(
     # primary-key SELECT buys an instance that matches the row and is safe to
     # read from even when the settlement rolled back underneath it.
     job = await _require_job(session, job_id, fresh=True)
+
+    # `state` rather than `job.state`: the re-read above can come back holding
+    # whatever a racing caller wrote, and what this pass settled is the state
+    # it stamped. The characters are upstream's count, which is what was
+    # billed — `submitted_characters` is what we asked for, and the gap between
+    # the two is the failed clips nobody pays for.
+    metrics.record_batch_job(state=state.value, characters=characters)
 
     logger.info(
         "tts_batch_settled job=%s state=%s chars=%d/%d audio_ms=%d charged=%s clamped=%s",

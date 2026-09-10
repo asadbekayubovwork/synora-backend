@@ -139,6 +139,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import metrics
 from app.core.cache import get_cache, user_sessions_key
 from app.core.config import settings
 from app.core.exceptions import (
@@ -558,6 +559,19 @@ async def _finalise(
                         ticket.ai_session_id,
                     )
 
+    # Paired with the `inc()` in `synthesize`, and this function is the only
+    # place that decrements: every path that opens an upstream response reaches
+    # it exactly once, including the one where opening the response is what
+    # failed. A gauge that leaks here reads as syntheses that never end, which
+    # is the same shape as the bug it exists to reveal.
+    metrics.tts_streams_inflight.dec()
+    metrics.record_stream(
+        end_reason=end_reason.value,
+        characters=characters,
+        audio_bytes=delivered_bytes,
+        replayed=ticket.replayed,
+    )
+
     logger.info(
         "tts_stream session=%s user=%s chars=%d bytes=%d audio_ms=%d reason=%s error=%s",
         ticket.ai_session_id,
@@ -761,6 +775,12 @@ async def synthesize(
             "tts_stream_replay session=%s user=%s", ticket.ai_session_id, ticket.user_id
         )
 
+    # Incremented here rather than at the top of the function, because
+    # everything above can still refuse — a spent idempotency key, a
+    # concurrency cap, a text over the ceiling — and none of those reaches
+    # `_finalise`, which is what brings the gauge back down.
+    metrics.tts_streams_inflight.inc()
+
     stack = AsyncExitStack()
     try:
         response = await stack.enter_async_context(
@@ -837,6 +857,10 @@ async def synthesize(
         delivered = 0
         end_reason = SessionEndReason.COMPLETED
         error_code: str | None = None
+        # The relay's own clock, measured here rather than in the middleware:
+        # `synora_http_request_seconds` stops at the status line, which on this
+        # route is before the first byte of audio.
+        relay_started = time.monotonic()
         # The clock the interval is measured from, started here rather than
         # left null so that the *first* mark also waits an interval. An
         # ordinary synthesis ends well inside one and therefore writes no
@@ -937,6 +961,11 @@ async def synthesize(
             # text, which is the agreed policy: the GPU did the whole job.
             raise
         finally:
+            # Observed before the shielded await, not after: a cancelled task
+            # re-raises at its first suspension once the shield's coroutine is
+            # done, so a line below it is a line that does not run on the
+            # disconnect path — which is exactly the case worth measuring.
+            metrics.tts_stream_seconds.observe(time.monotonic() - relay_started)
             # Shielded and tracked: a disconnect arrives as a cancellation, and
             # an unshielded await in a cancelled task re-raises before it runs.
             # The bill for a disconnected stream is the whole text, so this is

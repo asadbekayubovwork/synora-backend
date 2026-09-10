@@ -502,6 +502,41 @@ Swapping `TTS_API_KEY` for `reject-me`, `quota`, `busy`, `bad-input` or
 to see `tts_key_rejected`, `tts_busy` and the rest without breaking anything.
 Details in [dev-ui/README.md](dev-ui/README.md).
 
+## Watching it work
+
+`/metrics` exposes what this process counted while it was working, in
+Prometheus's text format, and `grafana/` is a two-container stack that graphs
+it:
+
+```bash
+.venv/bin/uvicorn app.main:app --port 8000
+docker compose -f grafana/docker-compose.yml up -d     # → http://localhost:3001
+```
+
+The dashboard is provisioned from files, so it is the same on everyone's
+machine and a panel change is a diff rather than a click.
+
+Nothing on it is derived from logs or recomputed from the database afterwards.
+Every counter is incremented by the code that already knew the answer:
+`_finalise` knows how a stream ended, `settle_oneshot` knows what was debited,
+`reconcile_all` knows what diverged. A metric read off a second source is a
+metric that eventually disagrees with the first one, and the argument for
+metering on this side of the gateway is that there is only one count.
+
+Four things a counter cannot know — credit held by unsettled sessions, open
+sessions, open batch jobs, balances — are read from the rows at scrape time by
+`refresh_db_gauges`. That is what makes **held credit** a graph rather than a
+guess, and a floor that climbs across a quiet night is a hold that never came
+back.
+
+Two rules that boot-time checks enforce rather than document:
+`METRICS_TOKEN` is required outside development, because nginx proxies
+`location /` and the endpoint publishes call volumes and credit movements; and
+`METRICS_ENABLED` with `WORKER_COUNT > 1` is refused, because the registry is
+per-process and Prometheus would scrape whichever worker the proxy picked.
+Details in [grafana/README.md](grafana/README.md) and in the module docstring
+of `app/core/metrics.py`.
+
 ## The Nuxt frontend
 
 `Synora-frontend` is already wired to this API. The browser calls it directly —
@@ -598,6 +633,7 @@ Everything lives in `.env`; see [.env.example](.env.example) for the full list.
 | `BILLING_HOLD_SECONDS` | `120` | How much of a realtime session to reserve up front |
 | `BILLING_ROLLUP_TIMEZONE` | `Asia/Tashkent` | Local day boundary for usage reports |
 | `TTS_BASE_URL` / `TTS_API_KEY` | unset | Unset ⇒ every `/tts` route answers `503`. One without the other is refused at boot. Full list in [docs/TTS.md](docs/TTS.md#configuration) |
+| `METRICS_ENABLED` / `METRICS_TOKEN` | `true` / unset | `GET /metrics`. A token is required outside development — nginx proxies `location /`, so the endpoint is public the moment it exists |
 | `RABBITMQ_URL` | unset | Unset ⇒ batch jobs are submitted inline and polled when read. See [docs/QUEUEING.md](docs/QUEUEING.md) |
 | `RABBITMQ_PREFETCH` | `4` | Batch items in flight against the single GPU. A ceiling, not a throughput knob |
 
@@ -731,6 +767,7 @@ docs/
 ├── TTS.md               The speech contract: routes, billing, errors
 └── QUEUEING.md          Where RabbitMQ is used, and where it deliberately isn't
 dev-ui/                  One HTML file that drives every route from a browser
+grafana/                 Prometheus + Grafana, provisioned from files
 devtools/                Scripts for things the API deliberately will not do
 deploy/                  Release script, systemd unit, one-time server setup
 ```

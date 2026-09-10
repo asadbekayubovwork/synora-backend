@@ -180,6 +180,23 @@ class Settings(BaseSettings):
     # Comma separated so the .env stays readable; "*" allows any origin.
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
+    # --- Metrics -----------------------------------------------------------
+    # `GET /metrics`, for Prometheus. Recording is unconditional; this switch
+    # only decides whether the endpoint answers, because a flag that also
+    # silenced the counters would make a metrics bug look like an app bug.
+    metrics_enabled: bool = True
+    # A bearer token for that endpoint, and outside development it is required.
+    # The reason is nginx: this API is reached through a `location /` proxy, so
+    # a route we add is public the moment it exists, and this one reports call
+    # volumes, credit movements and customer counts. Empty means open, which is
+    # fine on a loopback dev box and is refused by
+    # `assert_production_ready` anywhere else.
+    metrics_token: str = ""
+    # The three aggregates `refresh_db_gauges` runs per scrape: held credit,
+    # open sessions, open batch jobs. Nothing else can report those, and
+    # nothing else notices a hold that never came back.
+    metrics_db_gauges: bool = True
+
     @property
     def is_development(self) -> bool:
         return self.environment.lower() in {"development", "dev", "local"}
@@ -263,6 +280,24 @@ class Settings(BaseSettings):
             problems.append(
                 "WORKER_COUNT > 1 requires REDIS_URL "
                 "(the background-job lease and the SSE fan-out both need it)"
+            )
+        # A metrics endpoint is reachable from the internet the moment nginx
+        # proxies `location /`, and it publishes exactly the numbers a
+        # competitor would like: request volumes, credits debited, how many
+        # wallets there are. Prometheus supports bearer tokens, so there is no
+        # deployment that needs this open.
+        if self.metrics_enabled and not self.metrics_token.strip():
+            problems.append(
+                "METRICS_TOKEN must be set (or METRICS_ENABLED=false): "
+                "/metrics is public behind an nginx `location /`"
+            )
+        # One registry per process, and Prometheus scrapes whichever worker the
+        # proxy picks. See the module docstring of `app/core/metrics.py`.
+        if self.metrics_enabled and self.worker_count > 1:
+            problems.append(
+                "METRICS_ENABLED with WORKER_COUNT > 1 needs "
+                "prometheus_client's multiprocess mode; the per-process "
+                "registries would report a fraction of the traffic"
             )
         if self.billing_grace_micros < 0 or self.billing_grace_seconds < 0:
             problems.append("BILLING_GRACE_* must not be negative")

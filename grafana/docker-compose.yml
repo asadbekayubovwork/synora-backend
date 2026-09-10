@@ -1,0 +1,57 @@
+# Prometheus + Grafana for a development box. Two containers, no volumes to
+# keep, provisioned entirely from the files next to this one — so a dashboard
+# edit is a file edit and a `docker compose restart grafana`, not a click
+# somebody else cannot reproduce.
+#
+#   docker compose -f grafana/docker-compose.yml up -d
+#   → Grafana     http://localhost:3001   (the Synora dashboard is already there)
+#   → Prometheus  http://localhost:9090   (for writing a query before it is a panel)
+#
+# Not for production. Anonymous access is on and it is on deliberately: this
+# stack exists so a developer can see the meters move, and a login prompt in
+# front of a localhost dashboard is friction that teaches nothing. A real
+# deployment gets its own Grafana with real accounts, and points it at the same
+# `/metrics` with a `METRICS_TOKEN`.
+services:
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: synora-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      # Two days. The API here is a development process that gets restarted a
+      # dozen times an afternoon; a month of retention would only make the
+      # container bigger.
+      - --storage.tsdb.retention.time=2d
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      # `host.docker.internal` resolves on Docker Desktop and does not on
+      # Linux, where this line supplies it. The API runs on the host, not in
+      # this compose file: it needs your .env, your database and your venv, and
+      # containerising it for the sake of a scrape would mean maintaining a
+      # second way to run the app.
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: synora-grafana
+    depends_on:
+      - prometheus
+    ports:
+      # 3001, because 3000 belongs to `dev-ui/` and to the Nuxt frontend.
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_BASIC_ENABLED: "false"
+      # Land on the dashboard rather than on an empty home page.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/synora-ops.json
+      GF_USERS_DEFAULT_THEME: dark
+      GF_LOG_LEVEL: warn
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro

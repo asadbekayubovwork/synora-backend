@@ -13,6 +13,7 @@ import uuid
 from fastapi import APIRouter, Header, Path
 
 from app.api.deps import AdminUser, SessionDep
+from app.core import metrics
 from app.core.exceptions import BadRequestError
 from app.models.billing_enums import LedgerBucket, LedgerEntryKind, LedgerRefType
 from app.schemas.auth import ErrorResponse
@@ -246,6 +247,12 @@ async def reconcile(
     # anything the sweep frees waits a whole cycle to be noticed.
     swept = await tts_batch_service.sweep_stale_jobs(session)
     report = await reconcile_service.reconcile_all(session)
+    # Recorded here rather than inside `reconcile_service`, for the same reason
+    # the sweep is composed here: this is the only place that knows the whole
+    # pass. `diverged` is the number worth an alert — a wallet that disagrees
+    # with its ledger stays diverged until somebody looks, so a gauge above
+    # zero for two scrapes running is not noise.
+    metrics.record_reconcile({**report, "swept": swept})
     return WalletAuditResponse(
         checked=report["checked"],
         swept=swept,

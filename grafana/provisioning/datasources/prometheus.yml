@@ -1,0 +1,15 @@
+# The uid is fixed and referenced by every panel in `dashboards/`. A
+# Grafana-generated uid would differ per machine, and a dashboard JSON that
+# names one would come up with "datasource not found" on everyone else's.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: synora-prom
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST

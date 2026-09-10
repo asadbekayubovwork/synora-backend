@@ -1,0 +1,1716 @@
+{
+  "uid": "synora-ops",
+  "title": "Synora API \u2014 operations",
+  "description": "Every number here is counted by the API process itself, next to the code that did the work. See app/core/metrics.py.",
+  "tags": [
+    "synora"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m"
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Traffic",
+      "id": 1,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests per second, by route",
+      "id": 2,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "Route templates, never paths: `/tts/batch/{job_id}` is one series.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (route) (rate(synora_http_requests_total[1m]))",
+          "legendFormat": "{{route}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 18,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Latency to the status line (p50 / p95)",
+      "id": 3,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "Stops at the status line. On `/tts/speech` the audio comes after it, so this is time-to-headers there and the relay is its own panel below.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(synora_http_request_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(synora_http_request_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "range": true,
+          "instant": false,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(synora_http_request_seconds_bucket{route=~\"/api/v1/tts.*\"}[5m])))",
+          "legendFormat": "p95 {{route}}",
+          "range": true,
+          "instant": false,
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Refusals per minute, by code",
+      "id": 4,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "The stable `code` from the error body, not the status. `402 insufficient_balance` is a customer who needs a top-up; `503 tts_key_rejected` is our own credential \u2014 both are refusals and only one is anybody's emergency.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (code) (rate(synora_api_errors_total[5m]) * 60)",
+          "legendFormat": "{{code}}",
+          "range": true,
+          "instant": false,
+          "refId": "E"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 18,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "5xx share (5m)",
+      "id": 5,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "Zero is zero here, not \"No data\": the 5xx series does not exist until the first one happens, and an error-rate panel that cannot tell \"nothing broke\" from \"nothing scraped\" is worse than no panel.",
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 12,
+        "y": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "(sum(rate(synora_http_requests_total{status=~\"5..\"}[5m])) or vector(0)) / clamp_min(sum(rate(synora_http_requests_total[5m])), 0.0001)",
+          "legendFormat": "errors",
+          "range": true,
+          "instant": false,
+          "refId": "F"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.01
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "In flight",
+      "id": 6,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "Syntheses in flight that never falls back to zero is a leaked gauge \u2014 or a leaked hold.",
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 16,
+        "y": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "synora_http_requests_inflight",
+          "legendFormat": "requests",
+          "range": true,
+          "instant": false,
+          "refId": "G"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "synora_tts_streams_inflight",
+          "legendFormat": "syntheses",
+          "range": true,
+          "instant": false,
+          "refId": "H"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Uptime",
+      "id": 7,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "From prometheus_client's process collector, which needs /proc: empty on macOS, present in production. Resets on every deploy \u2014 a counter that drops to zero at the same moment is not a bug.",
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 20,
+        "y": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "time() - process_start_time_seconds{job=\"synora-api\"}",
+          "legendFormat": "uptime",
+          "range": true,
+          "instant": false,
+          "refId": "I"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Speech",
+      "id": 8,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Syntheses per minute, by outcome",
+      "id": 9,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "`billed` moved audio and charged for it, `free` never got a byte out of upstream and charged nothing, `replay` re-synthesised for a retry under a spent idempotency key and charged nothing either.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (charge) (rate(synora_tts_streams_total[5m]) * 60)",
+          "legendFormat": "{{charge}}",
+          "range": true,
+          "instant": false,
+          "refId": "J"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (end_reason) (rate(synora_tts_streams_total{end_reason!=\"completed\"}[5m]) * 60)",
+          "legendFormat": "{{end_reason}}",
+          "range": true,
+          "instant": false,
+          "refId": "K"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Time to first audio, from upstream (p50 / p95)",
+      "id": 10,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "Headers are the GPU queueing up; the relay includes the audio, so it grows with the text. Alert on the first, read the second.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(synora_tts_upstream_seconds_bucket{operation=\"stream\"}[5m])))",
+          "legendFormat": "p50 headers",
+          "range": true,
+          "instant": false,
+          "refId": "L"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(synora_tts_upstream_seconds_bucket{operation=\"stream\"}[5m])))",
+          "legendFormat": "p95 headers",
+          "range": true,
+          "instant": false,
+          "refId": "M"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(synora_tts_stream_seconds_bucket[5m])))",
+          "legendFormat": "p95 whole relay",
+          "range": true,
+          "instant": false,
+          "refId": "N"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Characters billed per minute",
+      "id": 11,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "The one quantity the price book prices. Replays are excluded \u2014 they charge nothing.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 25
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "rate(synora_tts_characters_total[5m]) * 60",
+          "legendFormat": "streamed",
+          "range": true,
+          "instant": false,
+          "refId": "O"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "rate(synora_tts_batch_characters_total[5m]) * 60",
+          "legendFormat": "batch",
+          "range": true,
+          "instant": false,
+          "refId": "P"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Upstream failures per minute, by code",
+      "id": 12,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "`tts_key_rejected` and `tts_quota_exhausted` are ours to fix and are logged at ERROR; `tts_unreachable` is the tunnel; `tts_rejected_input` is the caller's own text and is not an incident.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 25
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (code, operation) (rate(synora_tts_upstream_errors_total[5m]) * 60)",
+          "legendFormat": "{{operation}} {{code}}",
+          "range": true,
+          "instant": false,
+          "refId": "Q"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 18,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Audio relayed",
+      "id": 13,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "Bandwidth, counted for replays too \u2014 those bytes are real.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 25
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "rate(synora_tts_audio_bytes_total[5m])",
+          "legendFormat": "bytes/s",
+          "range": true,
+          "instant": false,
+          "refId": "R"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Money",
+      "id": 14,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Credits per minute",
+      "id": 15,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "Micros on the wire, credits on the axis. Counted after the commit, so a rolled-back settlement never appears here.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 33
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (service) (rate(synora_credits_debited_micros_total[5m]) * 60) / 1e6",
+          "legendFormat": "debited {{service}}",
+          "range": true,
+          "instant": false,
+          "refId": "S"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (service) (rate(synora_credits_writeoff_micros_total[5m]) * 60) / 1e6",
+          "legendFormat": "written off {{service}}",
+          "range": true,
+          "instant": false,
+          "refId": "T"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Held right now",
+      "id": 16,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "Credit committed to sessions that have not settled. It should spike during calls and fall back; a floor that climbs across a quiet night is a hold that never came back, and `POST /admin/reconcile` is what recovers it.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 33
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "synora_wallet_reserved_micros / 1e6",
+          "legendFormat": "reserved",
+          "range": true,
+          "instant": false,
+          "refId": "U"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 3,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Ledger divergence",
+      "id": 17,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "Wallets whose balance disagreed with their own ledger on the last reconciliation pass. The only number here that should be alerted on at any value above zero \u2014 and it only refreshes when a pass runs.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 33
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "synora_reconcile_diverged",
+          "legendFormat": "wallets",
+          "range": true,
+          "instant": false,
+          "refId": "V"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Credit in wallets",
+      "id": 18,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "What customers are holding, by bucket. Bonus is spent first because it expires.",
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 37
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (bucket) (synora_wallet_balance_micros) / 1e6",
+          "legendFormat": "{{bucket}}",
+          "range": true,
+          "instant": false,
+          "refId": "W"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 18,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Sessions, jobs and the process",
+      "id": 19,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 41
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Open sessions, by status",
+      "id": 20,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "Read from the rows at scrape time. `pending` that never leaves is a ticket nobody claimed.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 42
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "synora_ai_sessions_open",
+          "legendFormat": "{{status}}",
+          "range": true,
+          "instant": false,
+          "refId": "X"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 18,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Open batch jobs, by state",
+      "id": 21,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "`queued` means upstream has never seen it. With no broker a job only moves when somebody reads it, so a pile here on a dev box is normal and a pile in production is a dead worker.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 42
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "synora_tts_batch_jobs_open",
+          "legendFormat": "{{state}}",
+          "range": true,
+          "instant": false,
+          "refId": "Y"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 18,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Settlements and reaps per minute",
+      "id": 22,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "A reap is a hold that came back late. Steady reaping means something is dying mid-stream. `clamped` is a settlement that priced above the session's ceiling: it is billed at the ceiling and the row is flagged `disputed`, so any value here is somebody's bug rather than a busy day.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 42
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (end_reason) (rate(synora_sessions_settled_total[5m]) * 60)",
+          "legendFormat": "settled {{end_reason}}",
+          "range": true,
+          "instant": false,
+          "refId": "Z"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(synora_sessions_abandoned_total[5m]) * 60)",
+          "legendFormat": "abandoned",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "rate(synora_reconcile_reaped_total[15m]) * 60",
+          "legendFormat": "reaped",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "rate(synora_sessions_clamped_total[15m]) * 60",
+          "legendFormat": "clamped",
+          "range": true,
+          "instant": false,
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Process",
+      "id": 23,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "From prometheus_client's own collector. Absent on macOS, which has no /proc.",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 49
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "process_resident_memory_bytes{job=\"synora-api\"}",
+          "legendFormat": "resident memory",
+          "range": true,
+          "instant": false,
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU",
+      "id": 24,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 49
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "rate(process_cpu_seconds_total{job=\"synora-api\"}[5m])",
+          "legendFormat": "cores",
+          "range": true,
+          "instant": false,
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Batch outcomes and reconciliation",
+      "id": 25,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 55
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Batch jobs finished per hour, by state",
+      "id": 26,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "`expired` is a job we stopped polling and settled at the last usage upstream admitted to; `cancelled` is a user who changed their mind. Both leave the hold released \u2014 that is the invariant, and this is where you notice it is not.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (state) (increase(synora_tts_batch_jobs_total[1h]))",
+          "legendFormat": "{{state}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 40,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconciliation activity per hour",
+      "id": 27,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "Nothing runs this on a timer yet \u2014 `POST /admin/reconcile` is the only caller \u2014 so a flat zero here means nobody has looked, not that there was nothing to find. `synora_reconcile_diverged` above only refreshes when a pass runs, for the same reason.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "increase(synora_reconcile_runs_total[1h])",
+          "legendFormat": "passes",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "increase(synora_reconcile_reaped_total[1h])",
+          "legendFormat": "sessions reaped",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "increase(synora_reconcile_swept_total[1h])",
+          "legendFormat": "batch jobs swept",
+          "range": true,
+          "instant": false,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "increase(synora_reconcile_healed_micros_total[1h]) / 1e6",
+          "legendFormat": "credits healed",
+          "range": true,
+          "instant": false,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "synora_reconcile_checked",
+          "legendFormat": "wallets checked (last pass)",
+          "range": true,
+          "instant": false,
+          "refId": "E"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 40,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ],
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": []
+  }
+}

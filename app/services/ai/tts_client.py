@@ -45,6 +45,7 @@ first.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -52,8 +53,10 @@ from urllib.parse import quote
 
 import httpx
 
+from app.core import metrics
 from app.core.config import settings
 from app.core.exceptions import (
+    AppError,
     BadGatewayError,
     BadRequestError,
     NotFoundError,
@@ -277,6 +280,25 @@ def _unreachable(exc: httpx.HTTPError) -> BadGatewayError:
     )
 
 
+def _operation(method: str, path: str) -> str:
+    """A metric label for one upstream call, from a closed set.
+
+    The path carries voice ids and job ids, so it cannot be a label (see the
+    label rule in `app/core/metrics.py`). This collapses it to the operation
+    the path names — `voices`, `batch`, `usage` — which is what a dashboard
+    groups by anyway.
+    """
+    if path.startswith(PATH_VOICES):
+        return f"voices.{method.lower()}"
+    if path.startswith(PATH_BATCH):
+        if path.endswith("/results"):
+            return "batch.results"
+        return f"batch.{method.lower()}"
+    if path.startswith(PATH_USAGE):
+        return "usage"
+    return "other"
+
+
 async def _request(
     method: str,
     path: str,
@@ -285,6 +307,8 @@ async def _request(
 ) -> Any | None:
     """One request, one error vocabulary. `None` when the answer has no body."""
     require_configured()
+    operation = _operation(method, path)
+    started = time.perf_counter()
     try:
         response = await _client().request(
             method,
@@ -296,15 +320,28 @@ async def _request(
         # TimeoutException is a subclass of TransportError, so both arrive here
         # and `_unreachable` tells them apart for the log line only — the code
         # the caller sees is the same either way.
-        raise _unreachable(exc) from exc
+        error = _unreachable(exc)
+        metrics.record_upstream_error(operation=operation, code=error.code)
+        raise error from exc
 
-    _raise_for_upstream(response)
+    # Observed before the status is judged, so a slow refusal is still timed:
+    # a box that takes nine seconds to answer 429 is the interesting case, and
+    # timing only the successes would hide it.
+    metrics.observe_upstream(operation=operation, seconds=time.perf_counter() - started)
+    try:
+        _raise_for_upstream(response)
+    except AppError as error:
+        metrics.record_upstream_error(operation=operation, code=error.code)
+        raise
 
     if response.status_code == 204 or not response.content:
         return None
     try:
         return response.json()
     except ValueError as exc:
+        # A 2xx whose body is not JSON is an upstream failure too, and the one
+        # most likely to be a proxy in the way rather than the box itself.
+        metrics.record_upstream_error(operation=operation, code="tts_unreadable")
         raise BadGatewayError(
             "The speech service sent a response we could not read.",
             code="tts_unreadable",
@@ -358,17 +395,30 @@ async def stream_speech(body: dict[str, Any]) -> AsyncIterator[httpx.Response]:
         # decoded identical, and costs nothing: audio does not compress.
         headers={"Accept-Encoding": "identity"},
     )
+    # The headers, not the audio. This is the number that decides time to first
+    # sound, and the one worth an alert: the whole relay is measured separately
+    # by `synora_tts_stream_seconds`, where a long value means a long text
+    # rather than a struggling card.
+    started = time.perf_counter()
     try:
         response = await client.send(request, stream=True)
     except httpx.HTTPError as exc:
-        raise _unreachable(exc) from exc
+        error = _unreachable(exc)
+        metrics.record_upstream_error(operation="stream", code=error.code)
+        raise error from exc
+
+    metrics.observe_upstream(operation="stream", seconds=time.perf_counter() - started)
 
     try:
         if response.status_code >= 300:
             # An error body is small and JSON; read it so the 4xx branches can
             # quote upstream's own words about the caller's text.
             await response.aread()
-            _raise_for_upstream(response)
+            try:
+                _raise_for_upstream(response)
+            except AppError as error:
+                metrics.record_upstream_error(operation="stream", code=error.code)
+                raise
         yield response
     finally:
         await response.aclose()

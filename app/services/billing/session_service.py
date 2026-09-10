@@ -59,6 +59,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import metrics
 from app.core.config import settings
 from app.core.exceptions import (
     BadRequestError,
@@ -923,6 +924,18 @@ async def settle_oneshot(
         clamped,
         end_reason.value,
     )
+    # After the commit, never before it. A counter incremented next to a write
+    # that then rolls back is revenue on a dashboard that no wallet ever paid,
+    # and the two would drift apart in the one direction nobody audits — the
+    # graph reading high. Every replay path above returns before this line, so
+    # a retried settlement is counted once, by whoever actually charged it.
+    metrics.record_settlement(
+        service=row.service.value,
+        end_reason=end_reason.value,
+        debited_micros=debited,
+        writeoff_micros=writeoff,
+        clamped=clamped,
+    )
     return Settlement(
         ai_session_id=row.id,
         usage_event_id=event.id,
@@ -1137,6 +1150,17 @@ async def settle_at_estimate(
         movement.writeoff_micros,
         end_reason.value,
     )
+    # Counted under the same metric as an ordinary settlement, told apart by
+    # `end_reason` — `heartbeat_timeout` and `timeout` are the deadline
+    # charges, and a dashboard that wants only the honest ones filters on the
+    # label rather than needing a metric of its own.
+    metrics.record_settlement(
+        service=row.service.value,
+        end_reason=end_reason.value,
+        debited_micros=movement.charged_micros,
+        writeoff_micros=movement.writeoff_micros,
+        clamped=False,
+    )
     return Settlement(
         ai_session_id=row.id,
         usage_event_id=event.id,
@@ -1200,6 +1224,8 @@ async def abandon_oneshot(
         now=now,
     )
     await session.commit()
+
+    metrics.record_abandon(service=row.service.value, end_reason=end_reason.value)
 
     logger.info(
         "oneshot_abandoned session=%s reason=%s error=%s",

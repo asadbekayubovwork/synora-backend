@@ -29,3 +29,9 @@ redis>=5.2,<7
 # inside `RabbitBroker` rather than at module scope, so an API with no
 # RABBITMQ_URL never needs it installed; see `app/core/broker.py`.
 aio-pika>=9.4,<10
+
+# `GET /metrics`. A hard dependency rather than an optional one like Redis and
+# RabbitMQ: those are services that may genuinely be absent, this is a pure
+# Python library that `deploy/deploy.sh` installs before it restarts the unit.
+# See `app/core/metrics.py`.
+prometheus-client>=0.21,<1

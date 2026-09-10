@@ -33,15 +33,22 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from hmac import compare_digest
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import CONTENT_TYPE_LATEST
 
 from app.api.internal.router import internal_router
 from app.api.v1.router import api_router
 from app.core.broker import close_broker
 from app.core.config import settings
-from app.core.exceptions import register_exception_handlers
+from app.core.exceptions import (
+    NotFoundError,
+    UnauthorizedError,
+    register_exception_handlers,
+)
+from app.core.metrics import MetricsMiddleware, refresh_db_gauges, render
 from app.db.session import close_db, init_db
 from app.services.ai import tts_client, tts_service
 from app.services.oauth import configured_providers
@@ -261,6 +268,12 @@ app.add_middleware(
     expose_headers=list(tts_service.EXPOSED_HEADERS),
 )
 
+# Outermost of the two, so the time it records includes CORS and every
+# exception handler — the latency a caller actually experiences, not the
+# latency of our endpoint function. Raw ASGI rather than an HTTP middleware,
+# for the reason spelled out on the class.
+app.add_middleware(MetricsMiddleware)
+
 app.include_router(api_router, prefix=settings.api_prefix)
 # Mounted outside `api_prefix` on purpose: the microservice surface gets its own
 # path prefix so nginx can allowlist `location /internal/` at the edge, which is
@@ -271,6 +284,40 @@ app.include_router(internal_router, prefix="/internal/v1")
 @app.get("/health", tags=["Health"], summary="Liveness check")
 async def health() -> dict[str, str]:
     return {"status": "ok", "environment": settings.environment}
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics(request: Request) -> Response:
+    """Prometheus exposition. Not in the OpenAPI document, and not a JSON route.
+
+    Off the API prefix on purpose: `/api/v1/metrics` would sit inside the
+    surface a customer's token is meant to reach, and this is not a customer
+    endpoint. Off the `/internal` prefix too, because Prometheus does not sign
+    requests the way a microservice does — the token below is the whole of its
+    authentication, which is why `assert_production_ready` insists on one.
+
+    `METRICS_TOKEN` is compared with `compare_digest`: a `==` on a secret
+    leaks its length and its first differing byte to anyone who can time the
+    two responses, and there is no reason to be the exception.
+    """
+    if not settings.metrics_enabled:
+        # 404 rather than 503: a disabled endpoint should look like an endpoint
+        # that was never built, so a scanner learns nothing from the difference.
+        raise NotFoundError("Not found.", code="not_found")
+
+    expected = settings.metrics_token.strip()
+    if expected:
+        offered = request.headers.get("Authorization", "")
+        scheme, _, credential = offered.partition(" ")
+        if scheme.lower() != "bearer" or not compare_digest(credential, expected):
+            raise UnauthorizedError(
+                "Metrics require a bearer token.", code="metrics_unauthorized"
+            )
+
+    if settings.metrics_db_gauges:
+        await refresh_db_gauges()
+
+    return Response(content=render(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/", include_in_schema=False)
