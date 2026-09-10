@@ -3,5 +3,8 @@
 pytest>=8.3,<10
 pytest-asyncio>=0.24,<2
 
+# A deadlock in a concurrency test would otherwise hang CI forever.
+pytest-timeout>=2.3,<3
+
 # A local SMTP server, so the mailer is tested against a real socket.
 aiosmtpd>=1.4,<2

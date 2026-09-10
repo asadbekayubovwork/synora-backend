@@ -24,9 +24,15 @@ class AppError(HTTPException):
         status_code: int = status.HTTP_400_BAD_REQUEST,
         code: str = "bad_request",
         headers: dict[str, str] | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(status_code=status_code, detail=message, headers=headers)
         self.code = code
+        # Merged into the response body by the handler. camelCase, matching
+        # `statusMessage` and `retryAfter`, because the Nuxt client reads it.
+        # Keys with a None value are dropped, so a caller can pass a field it
+        # does not always know.
+        self.extra = {k: v for k, v in (extra or {}).items() if v is not None}
 
 
 class BadRequestError(AppError):
@@ -35,13 +41,58 @@ class BadRequestError(AppError):
 
 
 class UnauthorizedError(AppError):
-    def __init__(self, message: str, code: str = "unauthorized") -> None:
+    def __init__(
+        self,
+        message: str,
+        code: str = "unauthorized",
+        extra: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(
             message,
             status.HTTP_401_UNAUTHORIZED,
             code,
             headers={"WWW-Authenticate": "Bearer"},
+            # Used by the internal request-signing check to report our clock.
+            # Clock skew is the commonest cross-team integration failure and is
+            # undebuggable without it; the server's time is already in the
+            # `Date` header, so this reveals nothing new.
+            extra=extra,
         )
+
+
+class PaymentRequiredError(AppError):
+    """The wallet cannot cover this.
+
+    Distinct from 403 on purpose: the caller is not forbidden from doing this,
+    they just have to top up first, and the Nuxt app branches on the status to
+    open the top-up dialog rather than an error page.
+
+    The shortfall is in the body so the client can say "top up at least X"
+    instead of making the user guess.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        code: str = "insufficient_balance",
+        *,
+        required_micros: int | None = None,
+        available_micros: int | None = None,
+        shortfall_micros: int | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            status.HTTP_402_PAYMENT_REQUIRED,
+            code,
+            extra={
+                "requiredMicros": required_micros,
+                "availableMicros": available_micros,
+                "shortfallMicros": shortfall_micros,
+            },
+        )
+        self.required_micros = required_micros
+        self.available_micros = available_micros
+        self.shortfall_micros = shortfall_micros
 
 
 class ForbiddenError(AppError):
@@ -62,7 +113,13 @@ class ConflictError(AppError):
 class TooManyRequestsError(AppError):
     def __init__(self, message: str, code: str = "too_many_requests", retry_after: int | None = None) -> None:
         headers = {"Retry-After": str(retry_after)} if retry_after is not None else None
-        super().__init__(message, status.HTTP_429_TOO_MANY_REQUESTS, code, headers=headers)
+        super().__init__(
+            message,
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            code,
+            headers=headers,
+            extra={"retryAfter": retry_after},
+        )
         self.retry_after = retry_after
 
 
@@ -85,10 +142,9 @@ def _body(message: str, code: str, **extra: Any) -> dict[str, Any]:
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def _app_error(_: Request, exc: AppError) -> JSONResponse:
-        extra = {"retryAfter": exc.retry_after} if isinstance(exc, TooManyRequestsError) else {}
         return JSONResponse(
             status_code=exc.status_code,
-            content=_body(str(exc.detail), exc.code, **extra),
+            content=_body(str(exc.detail), exc.code, **exc.extra),
             headers=exc.headers,
         )
 

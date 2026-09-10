@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String
+from sqlalchemy import Boolean, DateTime, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -29,6 +29,17 @@ class User(Base):
     # signup, not an account, and cannot log in.
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # Grants the `/admin` routes, which move real money — a manual credit, a
+    # refund, publishing a price. A column rather than an `ADMIN_EMAILS`
+    # allowlist for three reasons: a Telegram-only account has no email and so
+    # could never be an admin; an email-based allowlist would turn any future
+    # "change my email" endpoint into privilege escalation; and every admin
+    # action needs attribution to a real user id, which the ledger records.
+    # Set it with `devtools/set_superuser.py` until there is a UI for it.
+    is_superuser: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
 
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
