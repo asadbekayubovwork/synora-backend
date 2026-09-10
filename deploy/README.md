@@ -97,6 +97,33 @@ ssh deploy@169.58.183.151 'DEPLOY_REF=<sha> /usr/local/sbin/synora-api-deploy'
 
 - **The database has no backup.** `bootstrap.sh` takes one copy at setup time;
   nothing copies `data/synora.db` anywhere after that.
-- **Schema changes are not migrated.** `init_db()` only creates missing tables,
-  so a deploy that alters an existing model needs the `ALTER TABLE`s (or Alembic)
-  applied by hand — the health check will pass while the queries fail.
+- **A pre-existing database has to be stamped once, by hand.** The release now
+  runs `alembic upgrade head` before the restart, so schema changes ship with
+  the code that needs them. That only works on a database Alembic knows the
+  state of. One that predates Alembic — built by `init_db()`'s `create_all` —
+  has no `alembic_version` row, so the first migration tries to create tables
+  that already exist and the release aborts. Fix it once, before the first
+  deploy that carries a migration:
+
+  ```bash
+  ssh root@169.58.183.151
+  cd /opt/synora-backend
+  sudo -u synora .venv/bin/alembic current      # empty means never stamped
+  sudo -u synora .venv/bin/alembic stamp 0001   # the pre-Alembic auth schema
+  sudo -u synora .venv/bin/alembic upgrade head
+  ```
+
+  Note what `stamp 0001` asserts: that the database already contains exactly
+  what revision `0001` creates. It is only true of a database that was serving
+  the auth-only code. Check `alembic current` first rather than assuming.
+
+- **Aborting mid-release leaves the schema forward.** The rollback puts the
+  previous commit back but does not migrate down, on purpose: every revision
+  here is additive, so older code ignores the new tables and runs correctly.
+  A revision that dropped or rewrote a column would break that, and does not
+  belong in an unattended release.
+
+- **The database has no backup, and now it has a schema worth losing.** The
+  point below has not changed, but the stakes have: `data/` now holds wallets
+  and an append-only ledger, so losing it loses money that is owed rather than
+  a table that can be rebuilt.

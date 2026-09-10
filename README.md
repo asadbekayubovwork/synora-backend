@@ -668,13 +668,34 @@ app/
 │   ├── otp_service.py   Code lifecycle
 │   ├── mailer.py        SMTP
 │   ├── oauth_service.py Provider identity -> user, linking, unlinking
-│   └── oauth/           One module per provider, behind one interface
-└── api/
-    ├── deps.py          Session and bearer-token dependencies
-    └── v1/
-        ├── auth.py      Email + password routes
-        └── oauth.py     Provider routes
-
+│   ├── oauth/           One module per provider, behind one interface
+│   ├── ai/
+│   │   ├── tts_client.py        The speech box, and nothing else. No money
+│   │   ├── tts_service.py       One metered stream: hold, relay, settle
+│   │   └── tts_batch_service.py A job, its hold and its settlement
+│   └── billing/
+│       ├── wallet_repo.py       THE only code that moves a balance
+│       ├── wallet_service.py    Wallet lifecycle and the read model
+│       ├── pricing.py           Quantities -> micro-credits
+│       ├── session_service.py   Open, settle or abandon a metered call
+│       └── reconcile_service.py Does the ledger still add up?
+├── api/
+│   ├── deps.py          Session, bearer-token and superuser dependencies
+│   ├── internal/        The microservice surface. HMAC-signed, not for browsers
+│   └── v1/
+│       ├── auth.py      Email + password routes
+│       ├── oauth.py     Provider routes
+│       ├── wallet.py    Balance and statement
+│       ├── tts.py       Speech: the metered stream, voices, batch jobs
+│       ├── usage.py     What this account consumed, from our own rows
+│       └── admin.py     Superuser-only money routes
+└── workers/             Processes that are not the API. All of them optional
+    └── tts_batch.py     python -m app.workers.tts_batch
+docs/
+├── INTERNAL_API.md      The contract the AI microservices code against
+├── TTS.md               The speech contract: routes, billing, errors
+└── QUEUEING.md          Where RabbitMQ is used, and where it deliberately isn't
+devtools/                Scripts for things the API deliberately will not do
 deploy/                  Release script, systemd unit, one-time server setup
 ```
 
@@ -707,9 +728,31 @@ systemctl restart synora-api         # after an .env or code change
 **Push to `main`.** [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)
 runs the test suite and, only if it is green, SSHes in as the `deploy` user and
 releases that commit. `/opt/synora-backend` is itself the checkout systemd runs,
-so a release is `git reset --hard <sha>`, `pip install -r requirements.txt`,
-restart, and a health check on `127.0.0.1:8010/health` — which, if it fails,
-puts the previous commit back before the run is marked failed.
+so a release is `git reset --hard <sha>`, `alembic upgrade head`,
+`pip install -r requirements.txt`, restart, and a health check on
+`127.0.0.1:8010/health` — which, if it fails, puts the previous commit back
+before the run is marked failed.
+
+**The migration step is not optional and is not decorative.** Alembic is the
+schema authority and `init_db()` deliberately does nothing outside SQLite, so
+without it a release restarts onto tables that do not exist. That failure is
+worse than it sounds, because it is silent: `/health` touches no table, so the
+health check passes, the deploy is marked green, the rollback never fires, and
+the first symptom is a 500 on every request that reads a wallet. It runs before
+the restart and as `synora` — `DATABASE_URL` lives in `.env`, which `deploy`
+deliberately cannot read — and a failure there aborts the release with the old
+code still serving, which is the outcome to want.
+
+Migrating before the restart is safe only because every revision here is
+additive: the old process keeps working against the new schema for the seconds
+until it is replaced, and a rollback that leaves the schema forward is
+harmless for the same reason. A revision that drops or rewrites a column the
+running code still reads breaks both halves of that and does not belong in an
+unattended release.
+
+**A database that predates Alembic must be stamped once, by hand**, or the
+first migrating release aborts trying to create tables that are already there.
+[`deploy/README.md`](deploy/README.md#known-gaps) has the three commands.
 
 The same script deploys by hand, so the two paths cannot drift:
 

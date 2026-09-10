@@ -76,8 +76,14 @@ log "Checked out $(as_deploy git -C "$BASE" rev-parse --short HEAD)"
 install -m 755 "$HERE/deploy.sh" /usr/local/sbin/synora-api-deploy
 log "Installed /usr/local/sbin/synora-api-deploy"
 
+# The second rule is what lets a release migrate. Alembic has to run as
+# `synora` because DATABASE_URL is in .env, which is 0600 synora:synora — the
+# whole point of splitting the two accounts is that `deploy` cannot read the
+# production secret. Pinned to the exact command, so this grants the right to
+# run one migration and nothing else.
 cat > /etc/sudoers.d/deploy-synora-api <<EOF
 $DEPLOY_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart $SERVICE, /usr/bin/systemctl status $SERVICE, /usr/bin/systemctl is-active $SERVICE, /usr/bin/journalctl -u $SERVICE *
+$DEPLOY_USER ALL=($APP_USER) NOPASSWD: $BASE/.venv/bin/alembic upgrade head
 EOF
 chmod 440 /etc/sudoers.d/deploy-synora-api
 visudo -cf /etc/sudoers.d/deploy-synora-api

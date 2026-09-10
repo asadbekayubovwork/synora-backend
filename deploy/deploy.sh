@@ -17,6 +17,8 @@ BASE=/opt/synora-backend
 REPO_URL=https://github.com/asadbekayubovwork/synora-backend.git
 BRANCH=${DEPLOY_BRANCH:-main}
 SERVICE=synora-api
+# Runs the service, and the only account that can read .env.
+APP_USER=synora
 # Loopback only; nginx is the sole way in from outside.
 HEALTH_URL=http://127.0.0.1:8010/health
 PIP=$BASE/.venv/bin/pip
@@ -43,6 +45,29 @@ activate() {
   sudo /usr/bin/systemctl restart "$SERVICE"
 }
 
+# Bring the schema up to what the new code expects. Alembic is the schema
+# authority and `init_db()` deliberately does nothing outside SQLite, so if this
+# does not run, nothing creates the tables a release needs.
+#
+# Before the restart, not after: every migration in this repo is additive, so
+# the old process keeps serving correctly against the new schema for the few
+# seconds until it is replaced. One that drops or rewrites a column the running
+# code still reads would need the service stopped first, and does not belong in
+# an unattended release at all.
+#
+# As `synora`, because DATABASE_URL lives in .env — 0600 synora:synora, since
+# `deploy` owns the code but deliberately cannot read the production secret.
+# The `cd "$BASE"` below is load-bearing: alembic reads alembic.ini out of the
+# working directory, and sudo keeps it.
+#
+# A failure here aborts the release with the old code still serving, which is
+# the outcome to want. A restart onto a schema that is not there would *pass*
+# the health check -- /health touches no table -- and then 500 on every request
+# that does, with no rollback because nothing looked unhealthy.
+migrate() {
+  sudo -u "$APP_USER" "$BASE/.venv/bin/alembic" upgrade head
+}
+
 [ -d "$BASE/.git" ] || die "$BASE is not a git checkout — run deploy/bootstrap.sh on the server first"
 
 cd "$BASE"
@@ -66,7 +91,10 @@ log "Deploying $SHA — $(git log -1 --pretty=%s)"
 # but not an import-time one: settings come from .env, which only `synora` reads.
 "$PYTHON" -m compileall -q app || die "app/ does not compile; live service left untouched"
 
-# --------------------------------------------------------- install and restart
+# ------------------------------------------------- migrate, install, restart
+log "Applying migrations"
+migrate
+
 log "Installing requirements and restarting $SERVICE"
 activate
 
