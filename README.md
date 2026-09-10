@@ -468,6 +468,40 @@ the other is refused at boot outside development, for the same reason a
 half-configured OAuth provider is: a surface that advertises itself as
 available and then fails on first use is worse than one that is plainly off.
 
+## Clicking through it in a browser
+
+Swagger at `/docs` covers most of the API, but `POST /tts/speech` returns audio,
+and Swagger hands that back as a download link with no player. `dev-ui/` is one
+dependency-free HTML file that drives every route from a browser instead:
+
+```bash
+.venv/bin/uvicorn app.main:app --port 8000
+python dev-ui/serve.py                       # → http://localhost:3000
+```
+
+Port 3000 because that is what `CORS_ORIGINS` defaults to. Register with
+`dev_code` filled in automatically, grant yourself credit, synthesise, and hear
+it — with the `X-Synora-*` headers, the time to first byte, and the ledger
+entries beside it. After every synthesis it checks the two things worth checking
+by hand: that the balance fell by exactly `X-Synora-Price-Micros`, and that
+`reserved` went back to zero.
+
+No speech box needed. `dev-ui/fake_speech_box.py` stands in for the GPU — it
+serves the paths `tts_client` expects and streams a tone sized from the
+character count, so the whole billing path is exercised without synthesising
+anything real:
+
+```bash
+python dev-ui/fake_speech_box.py             # → :8100
+TTS_BASE_URL=http://127.0.0.1:8100 TTS_API_KEY=fake-key \
+    .venv/bin/uvicorn app.main:app --port 8000
+```
+
+Swapping `TTS_API_KEY` for `reject-me`, `quota`, `busy`, `bad-input` or
+`garbage` makes it answer with the upstream failure of that name, which is how
+to see `tts_key_rejected`, `tts_busy` and the rest without breaking anything.
+Details in [dev-ui/README.md](dev-ui/README.md).
+
 ## The Nuxt frontend
 
 `Synora-frontend` is already wired to this API. The browser calls it directly —
@@ -696,6 +730,7 @@ docs/
 ├── INTERNAL_API.md      The contract the AI microservices code against
 ├── TTS.md               The speech contract: routes, billing, errors
 └── QUEUEING.md          Where RabbitMQ is used, and where it deliberately isn't
+dev-ui/                  One HTML file that drives every route from a browser
 devtools/                Scripts for things the API deliberately will not do
 deploy/                  Release script, systemd unit, one-time server setup
 ```

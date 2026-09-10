@@ -1,0 +1,905 @@
+<!doctype html>
+<html lang="uz">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Synora TTS — Dev UI</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #131a23; --panel-2: #182130; --line: #232e3d;
+    --text: #dfe7f1; --muted: #8595a9; --accent: #58a6ff;
+    --ok: #3fb950; --warn: #d29922; --err: #f85149;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+           padding: 10px 16px; border-bottom: 1px solid var(--line);
+           background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  header .sp { flex: 1; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .dot.off { background: var(--err); }
+  main { display: grid; grid-template-columns: 290px minmax(380px, 1fr) minmax(340px, .95fr);
+         gap: 12px; padding: 12px; align-items: start; }
+  @media (max-width: 1150px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  section > h2 { margin: 0; padding: 10px 14px; font-size: 12px; text-transform: uppercase;
+                 letter-spacing: .8px; color: var(--muted); border-bottom: 1px solid var(--line); }
+  .body { padding: 12px 14px; }
+  label { display: block; font-size: 11px; color: var(--muted); margin: 8px 0 4px;
+          text-transform: uppercase; letter-spacing: .5px; }
+  input, select, textarea { width: 100%; padding: 8px 10px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; font: 13px var(--mono); }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+  textarea { resize: vertical; }
+  button { padding: 8px 12px; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--panel-2); color: var(--text); font-size: 13px; cursor: pointer; }
+  button:hover { border-color: var(--accent); color: #fff; }
+  button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  button.primary:hover { background: #2f81f7; }
+  button.danger { color: var(--err); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; align-items: center; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 10px; }
+  .tabs { display: flex; gap: 4px; padding: 8px 10px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .tabs button { border: none; background: none; color: var(--muted);
+                 border-bottom: 2px solid transparent; border-radius: 0; padding: 6px 10px; }
+  .tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab { display: none; } .tab.active { display: block; }
+  .kv { display: grid; grid-template-columns: 108px 1fr; gap: 4px 10px; font-size: 12px; }
+  .kv span:nth-child(odd) { color: var(--muted); }
+  .kv span:nth-child(even) { font-family: var(--mono); word-break: break-all; }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 20px; font-size: 11px; border: 1px solid var(--line); }
+  .pill.ok { color: var(--ok); border-color: #1c5a2b; }
+  .pill.no { color: var(--warn); border-color: #5c4813; }
+  .pill.bad { color: var(--err); border-color: #6e2a26; }
+  .tok { font-family: var(--mono); font-size: 11px; color: var(--muted); word-break: break-all;
+         background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+         padding: 6px 8px; max-height: 58px; overflow: auto; }
+  .log { max-height: 78vh; overflow: auto; }
+  .entry { border-bottom: 1px solid var(--line); }
+  .entry summary { cursor: pointer; padding: 8px 12px; display: flex; gap: 8px; align-items: center;
+                   font-family: var(--mono); font-size: 12px; list-style: none; }
+  .entry summary::-webkit-details-marker { display: none; }
+  .entry pre { margin: 0; padding: 10px 12px; background: var(--bg); font: 11.5px/1.5 var(--mono);
+               overflow-x: auto; white-space: pre-wrap; word-break: break-word; color: #b9c7d8; }
+  .code { font-weight: 600; min-width: 30px; }
+  .code.s2 { color: var(--ok); } .code.s4 { color: var(--warn); } .code.s5 { color: var(--err); }
+  .meth { color: var(--accent); min-width: 46px; }
+  .ms { color: var(--muted); margin-left: auto; font-size: 11px; }
+  .hint { font-size: 11.5px; color: var(--muted); margin-top: 10px; line-height: 1.6; }
+  .hint code { color: var(--accent); }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 12px;
+          background: var(--panel-2); }
+  .card h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; font-weight: 500; color: var(--muted); font-size: 11px;
+       text-transform: uppercase; letter-spacing: .5px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--line); font-family: var(--mono); }
+  td.num, th.num { text-align: right; }
+  .neg { color: var(--err); } .pos { color: var(--ok); }
+  audio { width: 100%; margin-top: 8px; }
+  .counter { float: right; font-family: var(--mono); text-transform: none; letter-spacing: 0; }
+  .counter.over { color: var(--err); }
+  .toast { position: fixed; right: 16px; bottom: 16px; background: var(--panel-2);
+           border: 1px solid var(--line); border-left: 3px solid var(--accent); padding: 10px 14px;
+           border-radius: 8px; font-size: 13px; opacity: 0; transform: translateY(8px);
+           transition: .2s; pointer-events: none; max-width: 380px; z-index: 9; }
+  .toast.show { opacity: 1; transform: none; }
+  .toast.err { border-left-color: var(--err); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Synora TTS · Dev UI</h1>
+  <span class="dot" id="health"></span>
+  <span id="healthText" style="font-size:12px;color:var(--muted)">tekshirilmoqda…</span>
+  <span class="pill" id="ttsPill">TTS: ?</span>
+  <div class="sp"></div>
+  <label style="margin:0;text-transform:none">API</label>
+  <input id="apiBase" style="width:270px" value="http://127.0.0.1:8000/api/v1" />
+  <button id="btnHealth">/health</button>
+</header>
+
+<main>
+  <!-- ==================================================== chap: holat -->
+  <section>
+    <h2>Holat</h2>
+    <div class="body">
+      <div id="who"><div class="hint">Kirilmagan. O'rtadagi <b>Auth</b> yorliqidan boshlang.</div></div>
+
+      <div class="card" id="walletCard" style="display:none">
+        <h3>Hisob</h3>
+        <div class="kv" id="walletKv"></div>
+        <div class="hint" id="reservedHint"></div>
+      </div>
+
+      <label>Access token</label>
+      <div class="tok" id="atok">—</div>
+
+      <div class="row">
+        <button id="btnMe">/auth/me</button>
+        <button id="btnWallet">/wallet</button>
+        <button id="btnRefreshTokens">refresh</button>
+        <button id="btnClear" class="danger">tozalash</button>
+      </div>
+
+      <div class="hint">
+        Tokenlar <code>localStorage</code>da. Bu UI brauzerdan to'g'ridan-to'g'ri
+        API'ga boradi, ya'ni CORS, <code>Access-Control-Expose-Headers</code> va
+        xato formati ham shu yerda tekshiriladi.
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================================================== o'rta: formalar -->
+  <section>
+    <div class="tabs" id="tabs">
+      <button class="active" data-tab="auth">Auth</button>
+      <button data-tab="speech">Nutq</button>
+      <button data-tab="batch">Batch</button>
+      <button data-tab="voices">Ovozlar</button>
+      <button data-tab="usage">Usage</button>
+      <button data-tab="wallet">Wallet</button>
+      <button data-tab="admin">Admin</button>
+    </div>
+
+    <!-- ---------------------------------------------------------- auth -->
+    <div class="tab active" id="tab-auth">
+      <div class="body">
+        <div class="grid2">
+          <div><label>Email</label><input id="email" value="ali@example.com" /></div>
+          <div><label>Parol</label><input id="password" type="password" value="Str0ngPassw0rd" /></div>
+        </div>
+        <div class="row">
+          <button id="btnRegister" class="primary">register</button>
+          <button id="btnLogin">login</button>
+          <button id="btnResend">resend-otp</button>
+        </div>
+        <label>OTP kod <span class="counter" id="otpHint"></span></label>
+        <input id="otp" placeholder="register javobidagi dev_code shu yerga tushadi" />
+        <div class="row">
+          <button id="btnVerify" class="primary">verify-otp</button>
+        </div>
+        <div class="hint">
+          <code>dev_code</code> faqat <code>EXPOSE_DEV_OTP=true</code> bo'lganda qaytadi.
+          Aks holda kod server logida yoki emailda.
+        </div>
+      </div>
+    </div>
+
+    <!-- -------------------------------------------------------- speech -->
+    <div class="tab" id="tab-speech">
+      <div class="body">
+        <label>Matn <span class="counter" id="charCount">0 / 5000</span></label>
+        <textarea id="text" rows="4">Assalomu alaykum, bugun havo juda yaxshi.</textarea>
+        <div class="grid3">
+          <div><label>Ovoz</label><select id="voice"><option value="">(standart)</option></select></div>
+          <div><label>Sifat</label><select id="quality">
+            <option>low_latency</option><option selected>balanced</option><option>high_fidelity</option>
+          </select></div>
+          <div><label>Format</label><select id="format">
+            <option>mp3</option><option selected>wav</option><option>pcm</option><option>opus</option>
+          </select></div>
+        </div>
+        <div class="grid2">
+          <div><label>Sample rate</label><select id="sampleRate">
+            <option>8000</option><option>16000</option><option>22050</option><option>24000</option>
+            <option>32000</option><option>44100</option><option selected>48000</option>
+          </select></div>
+          <div><label>Style (ixtiyoriy)</label><input id="style" placeholder="—" /></div>
+        </div>
+        <label>Idempotency-Key (ixtiyoriy)</label>
+        <div class="row" style="margin-top:0">
+          <input id="idemKey" style="flex:1;min-width:200px" placeholder="bo'sh = har chaqiruv alohida" />
+          <button id="btnNewKey">yangi</button>
+        </div>
+        <div class="row">
+          <button id="btnEstimate">estimate</button>
+          <button id="btnSpeak" class="primary">sintez qilish</button>
+        </div>
+
+        <div class="card" id="estimateCard" style="display:none">
+          <h3>Estimate</h3><div class="kv" id="estimateKv"></div>
+        </div>
+
+        <div class="card" id="speechCard" style="display:none">
+          <h3>Javob</h3>
+          <div class="kv" id="speechKv"></div>
+          <audio id="player" controls></audio>
+          <div class="hint" id="speechCheck"></div>
+        </div>
+
+        <div class="hint">
+          Uzilib qolgan stream ham <b>butun matn</b> uchun hisoblanadi — baytlar GPU'ga
+          allaqachon berilgan. Narxni majburiyatsiz bilish uchun <code>estimate</code>.
+          Sintezdan keyin <code>reserved</code> nolga qaytganini chap panelda tekshirib turing.
+        </div>
+      </div>
+    </div>
+
+    <!-- --------------------------------------------------------- batch -->
+    <div class="tab" id="tab-batch">
+      <div class="body">
+        <label>Kliplar — har satr <code>id | matn</code> <span class="counter" id="batchCount"></span></label>
+        <textarea id="batchItems" rows="5">bob1 | Birinchi bob.
+bob2 | Ikkinchi bob.</textarea>
+        <div class="grid3">
+          <div><label>Ovoz</label><select id="batchVoice"><option value="">(standart)</option></select></div>
+          <div><label>Sifat</label><select id="batchQuality">
+            <option>low_latency</option><option>balanced</option><option selected>high_fidelity</option>
+          </select></div>
+          <div><label>Format</label><select id="batchFormat">
+            <option>mp3</option><option selected>wav</option><option>pcm</option><option>opus</option>
+          </select></div>
+        </div>
+        <label>Idempotency-Key</label>
+        <div class="row" style="margin-top:0">
+          <input id="batchIdem" style="flex:1;min-width:200px" placeholder="masalan: book-1" />
+          <button id="btnNewBatchKey">yangi</button>
+        </div>
+        <div class="row">
+          <button id="btnBatchCreate" class="primary">job yaratish</button>
+          <button id="btnBatchList">joblar ro'yxati</button>
+        </div>
+
+        <div class="card" id="jobCard" style="display:none">
+          <h3>Job</h3>
+          <div class="kv" id="jobKv"></div>
+          <div class="row">
+            <button id="btnJobRead">o'qish (GET)</button>
+            <label style="margin:0;display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0">
+              <input type="checkbox" id="jobPoll" style="width:auto" /> avto-poll 5s
+            </label>
+            <button id="btnJobResults">natijalar</button>
+            <button id="btnJobCancel" class="danger">bekor qilish</button>
+          </div>
+          <div class="hint">
+            Broker bo'lmasa <b>jobni o'qish uni oldinga suradi</b> — upstreamdan holatni
+            so'raydigan boshqa hech narsa yo'q. Lekin upstreamga <code>TTS_BATCH_POLL_SECONDS</code>
+            (standart 10 s) dan tez murojaat qilinmaydi: oradagi o'qishlar saqlangan satrni
+            qaytaradi, shuning uchun holat sakrab emas, har ~10 sekundda o'zgaradi.
+          </div>
+        </div>
+
+        <div id="batchTables"></div>
+      </div>
+    </div>
+
+    <!-- -------------------------------------------------------- voices -->
+    <div class="tab" id="tab-voices">
+      <div class="body">
+        <div class="row" style="margin-top:0">
+          <button id="btnVoices" class="primary">ovozlarni yuklash</button>
+        </div>
+        <div id="voiceTable"></div>
+        <div class="card">
+          <h3>Klon qo'shish</h3>
+          <label>Nom</label><input id="cloneName" placeholder="Ali (klon)" />
+          <div class="grid2">
+            <div><label>Audio fayl (3–30 s)</label><input type="file" id="cloneFile" accept="audio/*" /></div>
+            <div><label>Format</label><select id="cloneFormat">
+              <option selected>wav</option><option>mp3</option><option>flac</option><option>ogg</option>
+            </select></div>
+          </div>
+          <label>Transkript (ixtiyoriy)</label><input id="cloneTranscript" placeholder="—" />
+          <div class="row">
+            <label style="margin:0;display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0">
+              <input type="checkbox" id="cloneDenoise" style="width:auto" /> denoise
+            </label>
+            <button id="btnClone" class="primary">klonlash</button>
+          </div>
+          <div class="hint">
+            Ro'yxat <b>umumiy</b>, akkauntga bog'lanmagan: bu deploymentda bitta upstream
+            kaliti bor, shuning uchun klon hammaga ko'rinadi va <code>DELETE</code> uni
+            hamma uchun o'chiradi.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- --------------------------------------------------------- usage -->
+    <div class="tab" id="tab-usage">
+      <div class="body">
+        <div class="grid2">
+          <div><label>start (ixtiyoriy)</label><input id="usageStart" placeholder="2026-09-01T00:00:00Z" /></div>
+          <div><label>end (ixtiyoriy)</label><input id="usageEnd" placeholder="—" /></div>
+        </div>
+        <div class="row"><button id="btnUsage" class="primary">/usage</button></div>
+        <div id="usageTable"></div>
+        <div class="hint">
+          Bu raqamlar bizning <code>usage_events</code> jadvalimizdan, upstreamdan emas.
+          <code>events</code> har bir metrika bo'yicha alohida sanaladi — bir chaqiruv
+          ikki metrika yozsa, umumiy son ikki bo'ladi (<code>app/schemas/tts.py:907</code>).
+        </div>
+      </div>
+    </div>
+
+    <!-- -------------------------------------------------------- wallet -->
+    <div class="tab" id="tab-wallet">
+      <div class="body">
+        <div class="row" style="margin-top:0">
+          <button id="btnTxns" class="primary">tranzaksiyalar</button>
+          <button id="btnTxnsMore" disabled>ko'proq</button>
+          <span class="hint" style="margin:0" id="txnCursor"></span>
+        </div>
+        <div id="txnTable"></div>
+        <div class="hint">
+          Bitta sintez uchta satr qoldiradi: <code>hold</code> → <code>release</code> →
+          <code>debit</code>, hammasi bitta <code>group_id</code> ostida.
+        </div>
+      </div>
+    </div>
+
+    <!-- --------------------------------------------------------- admin -->
+    <div class="tab" id="tab-admin">
+      <div class="body">
+        <label>User ID</label><input id="adminUserId" placeholder="/auth/me bosilganda o'zi to'ladi" />
+        <div class="grid3">
+          <div><label>Micros</label><input id="adminAmount" value="10000000" /></div>
+          <div><label>Bucket</label><select id="adminBucket"><option selected>paid</option><option>bonus</option></select></div>
+          <div><label>Idempotency-Key</label><input id="adminIdem" value="ui-1" /></div>
+        </div>
+        <label>Izoh</label><input id="adminNote" value="dev-ui bilan sinash" />
+        <div class="row">
+          <button id="btnGrant" class="primary">kredit berish</button>
+          <button id="btnBalance">balansni o'qish</button>
+          <button id="btnFreeze" class="danger">freeze</button>
+          <button id="btnUnfreeze">unfreeze</button>
+          <button id="btnReconcile">reconcile</button>
+        </div>
+        <div id="reconcileOut"></div>
+        <div class="hint">
+          Superuser talab qiladi: <code>.venv/bin/python devtools/set_superuser.py &lt;email&gt;</code>.
+          1 kredit = 1 000 000 micros.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================================================== o'ng: log -->
+  <section>
+    <h2>So'rovlar</h2>
+    <div class="log" id="log"></div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const LS = "synora-tts-devui";
+
+  const store = new Proxy(JSON.parse(localStorage.getItem(LS) || "{}"), {
+    set(t, k, v) { t[k] = v; localStorage.setItem(LS, JSON.stringify(t)); return true; },
+  });
+  if (store.base) $("apiBase").value = store.base; else store.base = $("apiBase").value;
+  if (store.email) $("email").value = store.email;
+
+  $("apiBase").addEventListener("change", () => { store.base = $("apiBase").value.trim(); health(); });
+
+  // ------------------------------------------------------------ kredit
+  // Micros butun son — narxni floatga aylantirish aynan billingda qilmaydigan ish.
+  const credits = (m) => {
+    const n = Number(m || 0), sign = n < 0 ? "-" : "", a = Math.abs(n);
+    return sign + Math.trunc(a / 1e6) + "." + String(a % 1e6).padStart(6, "0");
+  };
+  const short = (id) => (id ? String(id).slice(0, 8) : "—");
+  const esc = (s) => String(s == null ? "—" : s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+  let toastTimer;
+  function toast(msg, isErr) {
+    const el = $("toast");
+    el.textContent = msg;
+    el.className = "toast show" + (isErr ? " err" : "");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => (el.className = "toast" + (isErr ? " err" : "")), 4200);
+  }
+
+  function logEntry(method, path, status, ms, payload, data, extra) {
+    const det = document.createElement("details");
+    det.className = "entry";
+    const cls = status >= 500 ? "s5" : status >= 400 ? "s4" : "s2";
+    det.innerHTML = `<summary><span class="code ${cls}">${status || "ERR"}</span>` +
+      `<span class="meth">${method}</span><span>${esc(path)}</span>` +
+      `<span class="ms">${ms} ms</span></summary>`;
+    const pre = document.createElement("pre");
+    pre.textContent = (extra ? extra + "\n" : "") +
+      (payload !== undefined ? "→ " + JSON.stringify(payload, null, 2) + "\n" : "") +
+      "← " + (typeof data === "string" ? data : JSON.stringify(data, null, 2));
+    det.appendChild(pre);
+    $("log").insertBefore(det, $("log").firstChild);
+    if ($("log").children.length > 40) $("log").lastChild.remove();
+  }
+
+  // API xatosi tekis shaklda keladi: {detail, statusMessage, code} — 402 esa
+  // ustiga requiredMicros / availableMicros / shortfallMicros qo'shadi.
+  function describe(status, data) {
+    if (!data || typeof data !== "object") return status + " xato";
+    let msg = (data.code || "xato") + " — " + (data.detail || data.statusMessage || "");
+    if (data.shortfallMicros != null) msg += " · yetmayapti " + credits(data.shortfallMicros);
+    return status + " " + msg;
+  }
+
+  async function api(method, path, { body, headers = {}, auth = true, query } = {}) {
+    let url = store.base.replace(/\/$/, "") + path;
+    if (query) {
+      const qs = new URLSearchParams(Object.entries(query).filter(([, v]) => v !== "" && v != null));
+      if (String(qs)) url += "?" + qs;
+    }
+    const h = { ...headers };
+    if (body !== undefined) h["Content-Type"] = "application/json";
+    if (auth) {
+      if (!store.access) { toast("Avval kiring", true); throw new Error("no token"); }
+      h["Authorization"] = "Bearer " + store.access;
+    }
+    const started = performance.now();
+    let res;
+    try {
+      res = await fetch(url, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) });
+    } catch (e) {
+      logEntry(method, path, 0, Math.round(performance.now() - started), body, String(e));
+      toast("Tarmoq xatosi: " + e.message + " — CORS_ORIGINS va port 3000ni tekshiring", true);
+      throw e;
+    }
+    const ms = Math.round(performance.now() - started);
+    const text = await res.text();
+    let data;
+    try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+    logEntry(method, path, res.status, ms, body, data);
+    if (!res.ok) {
+      toast(describe(res.status, data), true);
+      const e = new Error((data && data.code) || "http_error");
+      e.status = res.status; e.data = data;
+      throw e;
+    }
+    return data;
+  }
+
+  // ------------------------------------------------------------ health
+  async function health() {
+    const root = store.base.replace(/\/api\/v1\/?$/, "");
+    try {
+      const res = await fetch(root + "/health");
+      const data = await res.json();
+      $("health").className = "dot " + (res.ok ? "on" : "off");
+      $("healthText").textContent = data.status + " · " + data.environment;
+    } catch {
+      $("health").className = "dot off";
+      $("healthText").textContent = "javob bermayapti";
+    }
+  }
+
+  // `/tts` sozlanganini bilishning yagona yo'li — uni so'rash. TTS_BASE_URL yoki
+  // TTS_API_KEY bo'lmasa har bir /tts route 503 tts_not_configured qaytaradi,
+  // hatto upstreamga chiqmaydigan /estimate ham.
+  async function probeTts() {
+    if (!store.access) { setTtsPill("?", ""); return; }
+    try {
+      const data = await api("GET", "/tts/voices");
+      setTtsPill("TTS: sozlangan · " + data.voices.length + " ovoz", "ok");
+      fillVoices(data.voices);
+    } catch (e) {
+      if (e.data && e.data.code === "tts_not_configured") setTtsPill("TTS: sozlanmagan", "bad");
+      else setTtsPill("TTS: " + ((e.data && e.data.code) || e.status), "no");
+    }
+  }
+  const setTtsPill = (txt, cls) => { $("ttsPill").textContent = txt; $("ttsPill").className = "pill " + cls; };
+
+  // ------------------------------------------------------------ holat
+  function applyTokens(payload) {
+    if (payload.access_token) store.access = payload.access_token;
+    if (payload.refresh_token) store.refresh = payload.refresh_token;
+    if (payload.user) store.user = payload.user;
+    render();
+  }
+
+  function render() {
+    $("atok").textContent = store.access || "—";
+    const u = store.user;
+    if (!u) { $("who").innerHTML = `<div class="hint">Kirilmagan. <b>Auth</b> yorliqidan boshlang.</div>`; return; }
+    $("who").innerHTML = `<div class="kv">` +
+      `<span>email</span><span>${esc(u.email)}</span>` +
+      `<span>id</span><span>${esc(u.id)}</span>` +
+      `<span>holat</span><span>` +
+        `<span class="pill ${u.is_active ? "ok" : "no"}">${u.is_active ? "active" : "inactive"}</span> ` +
+        `<span class="pill ${u.is_verified ? "ok" : "no"}">${u.is_verified ? "verified" : "unverified"}</span>` +
+      `</span></div>`;
+    if (!$("adminUserId").value) $("adminUserId").value = u.id;
+  }
+
+  function renderWallet(w) {
+    store.wallet = w;
+    $("walletCard").style.display = "";
+    $("walletKv").innerHTML =
+      `<span>available</span><span>${w.available}</span>` +
+      `<span>reserved</span><span class="${w.reserved_micros ? "neg" : ""}">${w.reserved}</span>` +
+      `<span>paid</span><span>${w.paid}</span>` +
+      `<span>bonus</span><span>${w.bonus}</span>` +
+      `<span>holat</span><span>` +
+        `<span class="pill ${w.is_frozen ? "bad" : "ok"}">${w.is_frozen ? "frozen" : "ochiq"}</span>` +
+        (w.is_low ? ` <span class="pill no">low</span>` : "") +
+      `</span>`;
+    $("reservedHint").innerHTML = w.reserved_micros
+      ? `<span class="neg">reserved noldan katta.</span> Sessiya tugamagan — tirik stream bo'lmasa,
+         <code>POST /admin/reconcile</code> uni qaytaradi.`
+      : `reserved nolda — har sintezdan keyin tekshirishga arzigan yagona raqam.`;
+  }
+
+  const walletNow = () => api("GET", "/wallet").then((w) => { renderWallet(w); return w; });
+
+  // ------------------------------------------------------------ tabs
+  $("tabs").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-tab]");
+    if (!b) return;
+    document.querySelectorAll("#tabs button").forEach((x) => x.classList.toggle("active", x === b));
+    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.id === "tab-" + b.dataset.tab));
+  });
+
+  const on = (id, fn) => $(id).addEventListener("click", () => fn().catch(() => {}));
+
+  // ------------------------------------------------------------ auth
+  on("btnHealth", health);
+
+  on("btnRegister", async () => {
+    store.email = $("email").value.trim();
+    const data = await api("POST", "/auth/register", {
+      auth: false, body: { email: store.email, password: $("password").value },
+    });
+    if (data.dev_code) { $("otp").value = data.dev_code; toast("dev_code qo'yildi: " + data.dev_code); }
+    else toast("Kod yuborildi — server logini yoki emailni qarang");
+    $("otpHint").textContent = data.expires_in ? data.expires_in + " s" : "";
+  });
+
+  on("btnResend", async () => {
+    const data = await api("POST", "/auth/resend-otp", { auth: false, body: { email: $("email").value.trim() } });
+    if (data.dev_code) $("otp").value = data.dev_code;
+  });
+
+  on("btnVerify", async () => {
+    applyTokens(await api("POST", "/auth/verify-otp", {
+      auth: false, body: { email: $("email").value.trim(), code: $("otp").value.trim() },
+    }));
+    toast("Tasdiqlandi va kirildi");
+    await walletNow(); probeTts();
+  });
+
+  on("btnLogin", async () => {
+    store.email = $("email").value.trim();
+    applyTokens(await api("POST", "/auth/login", { auth: false, body: { email: store.email, password: $("password").value } }));
+    toast("Kirildi");
+    await walletNow(); probeTts();
+  });
+
+  on("btnRefreshTokens", async () => {
+    applyTokens(await api("POST", "/auth/refresh", { auth: false, body: { refresh_token: store.refresh } }));
+    toast("Tokenlar yangilandi");
+  });
+
+  on("btnMe", async () => { store.user = await api("GET", "/auth/me"); render(); });
+  on("btnWallet", walletNow);
+  $("btnClear").addEventListener("click", () => {
+    localStorage.removeItem(LS);
+    location.reload();
+  });
+
+  // ------------------------------------------------------------ speech
+  const MAX_SPEECH = 5000;
+  function countChars() {
+    const n = $("text").value.length;
+    $("charCount").textContent = n + " / " + MAX_SPEECH;
+    $("charCount").className = "counter" + (n > MAX_SPEECH ? " over" : "");
+  }
+  $("text").addEventListener("input", countChars);
+  countChars();
+
+  const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : "key-" + Date.now());
+  $("btnNewKey").addEventListener("click", () => ($("idemKey").value = newKey()));
+  $("btnNewBatchKey").addEventListener("click", () => ($("batchIdem").value = newKey()));
+
+  function fillVoices(voices) {
+    for (const sel of [$("voice"), $("batchVoice")]) {
+      const keep = sel.value;
+      sel.innerHTML = `<option value="">(standart)</option>` + voices.map((v) =>
+        `<option value="${esc(v.voice_id)}">${esc(v.display_name || v.voice_id)}</option>`).join("");
+      sel.value = keep;
+    }
+  }
+
+  const speechBody = () => {
+    const b = {
+      text: $("text").value,
+      quality: $("quality").value,
+      audio_format: $("format").value,   // `format` emas: Python builtin bilan to'qnashadi
+      sample_rate: Number($("sampleRate").value),
+    };
+    if ($("voice").value) b.voice_id = $("voice").value;
+    if ($("style").value.trim()) b.style = $("style").value.trim();
+    return b;
+  };
+
+  on("btnEstimate", async () => {
+    const data = await api("POST", "/tts/estimate", { body: { text: $("text").value } });
+    $("estimateCard").style.display = "";
+    $("estimateKv").innerHTML =
+      `<span>belgilar</span><span>${data.characters}</span>` +
+      `<span>narx</span><span>${data.price}</span>` +
+      `<span>balans</span><span>${data.available}</span>` +
+      `<span>yetadimi</span><span><span class="pill ${data.sufficient_credit ? "ok" : "bad"}">` +
+        `${data.sufficient_credit ? "ha" : "yo'q · " + data.shortfall}</span></span>` +
+      `<span>price book</span><span>${short(data.price_book_version_id)}…</span>`;
+  });
+
+  // Audio binar bo'lgani uchun `api()` dan o'tmaydi: oqimni o'zimiz o'qiymiz,
+  // shunda birinchi baytgacha ketgan vaqt ham ko'rinadi — narx esa undan oldin
+  // header'da allaqachon bo'ladi.
+  on("btnSpeak", async () => {
+    if (!store.access) { toast("Avval kiring", true); return; }
+    const before = await walletNow();
+    const body = speechBody();
+    const headers = { "Content-Type": "application/json", Authorization: "Bearer " + store.access };
+    if ($("idemKey").value.trim()) headers["Idempotency-Key"] = $("idemKey").value.trim();
+
+    const started = performance.now();
+    let res;
+    try {
+      res = await fetch(store.base.replace(/\/$/, "") + "/tts/speech", { method: "POST", headers, body: JSON.stringify(body) });
+    } catch (e) {
+      logEntry("POST", "/tts/speech", 0, Math.round(performance.now() - started), body, String(e));
+      toast("Tarmoq xatosi: " + e.message, true);
+      return;
+    }
+    const ttfb = Math.round(performance.now() - started);
+
+    if (!res.ok) {
+      const text = await res.text();
+      let data; try { data = JSON.parse(text); } catch { data = text; }
+      logEntry("POST", "/tts/speech", res.status, ttfb, body, data);
+      toast(describe(res.status, data), true);
+      await walletNow();
+      return;
+    }
+
+    const h = (n) => res.headers.get(n);
+    const chunks = [];
+    let bytes = 0, count = 0;
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value); bytes += value.length; count += 1;
+    }
+    const total = Math.round(performance.now() - started);
+    const blob = new Blob(chunks, { type: res.headers.get("content-type") || "audio/mpeg" });
+
+    logEntry("POST", "/tts/speech", res.status, total, body,
+      `${bytes} bayt, ${count} bo'lak, content-type ${res.headers.get("content-type")}`,
+      [...res.headers].filter(([k]) => k.startsWith("x-")).map(([k, v]) => k + ": " + v).join("\n"));
+
+    $("speechCard").style.display = "";
+    $("speechKv").innerHTML =
+      `<span>belgilar</span><span>${esc(h("X-Synora-Characters"))}</span>` +
+      `<span>narx</span><span>${esc(h("X-Synora-Price"))}</span>` +
+      `<span>session</span><span>${short(h("X-Synora-Session-Id"))}…</span>` +
+      `<span>sample rate</span><span>${esc(h("X-Synora-Sample-Rate"))}</span>` +
+      `<span>content-type</span><span>${esc(res.headers.get("content-type"))}</span>` +
+      `<span>baytlar</span><span>${bytes} · ${count} bo'lak</span>` +
+      `<span>vaqt</span><span>1-bayt ${ttfb} ms · jami ${total} ms</span>`;
+    $("player").src = URL.createObjectURL(blob);
+
+    const after = await walletNow();
+    const spent = before.available_micros - after.available_micros;
+    const quoted = Number(h("X-Synora-Price-Micros") || 0);
+    const okSpent = spent === quoted;
+    const okReserved = after.reserved_micros === 0;
+    $("speechCheck").innerHTML =
+      `<div>hisobdan yechildi <b>${credits(spent)}</b>, header'da <b>${credits(quoted)}</b> ` +
+      `<span class="pill ${okSpent ? "ok" : "bad"}">${okSpent ? "mos" : "mos emas"}</span></div>` +
+      `<div>reserved <b>${after.reserved}</b> <span class="pill ${okReserved ? "ok" : "bad"}">` +
+      `${okReserved ? "qaytdi" : "qaytmadi"}</span></div>` +
+      (h("X-Synora-Characters") && !$("voice").value
+        ? `<div>headerdagi belgi soni matn uzunligiga teng bo'lishi kerak: ${$("text").value.length}</div>` : "");
+    if (!okSpent || !okReserved) toast("Pul harakati kutilganday emas — logni qarang", true);
+  });
+
+  // ------------------------------------------------------------ batch
+  function batchItems() {
+    return $("batchItems").value.split("\n").map((line) => line.trim()).filter(Boolean).map((line, i) => {
+      const at = line.indexOf("|");
+      return at === -1
+        ? { id: "item-" + (i + 1), text: line }
+        : { id: line.slice(0, at).trim(), text: line.slice(at + 1).trim() };
+    });
+  }
+  function countBatch() {
+    const items = batchItems();
+    const chars = items.reduce((n, it) => n + it.text.length, 0);
+    $("batchCount").textContent = items.length + " klip · " + chars + " belgi";
+  }
+  $("batchItems").addEventListener("input", countBatch);
+  countBatch();
+
+  function renderJob(job) {
+    store.jobId = job.id;
+    $("jobCard").style.display = "";
+    $("jobKv").innerHTML =
+      `<span>id</span><span>${esc(job.id)}</span>` +
+      `<span>holat</span><span><span class="pill ${job.is_terminal ? "ok" : "no"}">${esc(job.state)}</span></span>` +
+      `<span>upstream</span><span>${esc(job.upstream_job_id)}</span>` +
+      `<span>kliplar</span><span>${job.completed_items}/${job.total_items} tayyor · ${job.failed_items} xato</span>` +
+      `<span>belgilar</span><span>yuborilgan ${job.submitted_characters} · hisoblangan ${job.billed_characters}</span>` +
+      `<span>estimated</span><span>${job.estimated}</span>` +
+      `<span>reserved</span><span class="${job.reserved_micros ? "neg" : ""}">${job.reserved}</span>` +
+      `<span>settled</span><span>${job.settled}</span>` +
+      (job.error ? `<span>xato</span><span class="neg">${esc(job.error)}</span>` : "");
+    if (job.is_terminal && $("jobPoll").checked) { $("jobPoll").checked = false; stopPoll(); walletNow(); }
+  }
+
+  on("btnBatchCreate", async () => {
+    const body = {
+      items: batchItems(),
+      quality: $("batchQuality").value,
+      audio_format: $("batchFormat").value,
+    };
+    if ($("batchVoice").value) body.voice_id = $("batchVoice").value;
+    const headers = {};
+    if ($("batchIdem").value.trim()) headers["Idempotency-Key"] = $("batchIdem").value.trim();
+    renderJob(await api("POST", "/tts/batch", { body, headers }));
+    await walletNow();
+  });
+
+  const readJob = async () => renderJob(await api("GET", "/tts/batch/" + store.jobId));
+  on("btnJobRead", readJob);
+
+  let pollTimer;
+  const stopPoll = () => { clearInterval(pollTimer); pollTimer = null; };
+  $("jobPoll").addEventListener("change", () => {
+    stopPoll();
+    // 5 s: upstreamga baribir 10 sekundda bir marta boradi, bundan tez surish
+    // faqat o'zimizning satrni qayta o'qiydi.
+    if ($("jobPoll").checked) pollTimer = setInterval(() => readJob().catch(stopPoll), 5000);
+  });
+
+  on("btnJobCancel", async () => {
+    renderJob(await api("DELETE", "/tts/batch/" + store.jobId));
+    await walletNow();
+  });
+
+  on("btnJobResults", async () => {
+    const data = await api("GET", "/tts/batch/" + store.jobId + "/results");
+    $("batchTables").innerHTML = `<div class="card"><h3>Natijalar · ${esc(data.state)}</h3>` +
+      table(["id", "holat", "belgi", "sekund", "qayta", "xato"], data.results.map((r) => [
+        esc(r.id), `<span class="pill ${r.ok ? "ok" : "bad"}">${r.ok ? "ok" : "xato"}</span>`,
+        r.characters ?? "—", r.audio_seconds ?? "—", r.retries ?? 0, esc(r.error),
+      ])) + `</div>`;
+  });
+
+  on("btnBatchList", async () => {
+    const data = await api("GET", "/tts/batch", { query: { limit: 10 } });
+    $("batchTables").innerHTML = `<div class="card"><h3>Joblar</h3>` +
+      table(["id", "holat", "kliplar", "estimated", "settled"], data.jobs.map((j) => [
+        `<a href="#" data-job="${esc(j.id)}" style="color:var(--accent)">${short(j.id)}…</a>`,
+        esc(j.state), j.completed_items + "/" + j.total_items, j.estimated, j.settled,
+      ])) + `</div>`;
+    $("batchTables").querySelectorAll("a[data-job]").forEach((a) =>
+      a.addEventListener("click", (e) => { e.preventDefault(); store.jobId = a.dataset.job; readJob(); }));
+  });
+
+  const table = (head, rows) =>
+    `<table><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>` +
+    (rows.length ? rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")
+                 : `<tr><td colspan="${head.length}" style="color:var(--muted)">bo'sh</td></tr>`) +
+    `</tbody></table>`;
+
+  // ------------------------------------------------------------ voices
+  on("btnVoices", async () => {
+    const data = await api("GET", "/tts/voices");
+    fillVoices(data.voices);
+    $("voiceTable").innerHTML = `<div class="card"><h3>${data.voices.length} ovoz</h3>` +
+      table(["voice_id", "nom", "ultimate", "sek", ""], data.voices.map((v) => [
+        esc(v.voice_id), esc(v.display_name),
+        v.supports_ultimate ? "ha" : "—", v.reference_seconds ?? "—",
+        `<button data-del="${esc(v.voice_id)}" class="danger">o'chirish</button>`,
+      ])) + `</div>`;
+    $("voiceTable").querySelectorAll("button[data-del]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        await api("DELETE", "/tts/voices/" + encodeURIComponent(b.dataset.del)).catch(() => {});
+        $("btnVoices").click();
+      }));
+  });
+
+  on("btnClone", async () => {
+    const file = $("cloneFile").files[0];
+    if (!file) { toast("Fayl tanlanmadi", true); return; }
+    const buf = new Uint8Array(await file.arrayBuffer());
+    let bin = "";
+    for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+    const body = {
+      display_name: $("cloneName").value.trim() || file.name,
+      audio_base64: btoa(bin),
+      audio_format: $("cloneFormat").value,
+      denoise: $("cloneDenoise").checked,
+    };
+    if ($("cloneTranscript").value.trim()) body.transcript = $("cloneTranscript").value.trim();
+    // Log base64 bilan to'lib ketmasin.
+    const shown = { ...body, audio_base64: `<${buf.length} bayt>` };
+    const data = await api("POST", "/tts/voices", { body }).catch((e) => { throw e; });
+    logEntry("POST", "/tts/voices", 200, 0, shown, data);
+    toast("Klon qo'shildi: " + data.voice_id);
+    $("btnVoices").click();
+  });
+
+  // ------------------------------------------------------------ usage
+  on("btnUsage", async () => {
+    const data = await api("GET", "/usage", {
+      query: { start: $("usageStart").value.trim(), end: $("usageEnd").value.trim() },
+    });
+    $("usageTable").innerHTML = `<div class="card">` +
+      `<h3>${data.period_start.slice(0, 10)} → ${data.period_end.slice(0, 10)}</h3>` +
+      table(["xizmat", "metrika", "miqdor", "hodisa", "narx"], data.lines.map((l) => [
+        esc(l.service), esc(l.metric), l.quantity, l.events, l.price,
+      ])) +
+      `<div class="row"><b>jami ${data.total}</b> · ${data.events} hodisa</div></div>`;
+  });
+
+  // ------------------------------------------------------------ wallet
+  async function loadTxns(cursor) {
+    const data = await api("GET", "/wallet/transactions", { query: { limit: 20, cursor } });
+    const rows = data.entries.map((e) => [
+      e.created_at.slice(11, 19), esc(e.kind), esc(e.bucket),
+      `<span class="${e.amount_micros < 0 ? "neg" : "pos"}">${e.amount}</span>`,
+      credits(e.balance_after_micros), short(e.group_id) + "…", esc(e.note),
+    ]);
+    const html = table(["vaqt", "kind", "bucket", "summa", "keyin", "group", "izoh"], rows);
+    if (cursor) $("txnTable").insertAdjacentHTML("beforeend", html);
+    else $("txnTable").innerHTML = html;
+    store.txnCursor = data.page.next_cursor || "";
+    $("btnTxnsMore").disabled = !data.page.has_more;
+    $("txnCursor").textContent = data.page.has_more ? "yana bor" : "oxiri";
+  }
+  on("btnTxns", () => loadTxns());
+  on("btnTxnsMore", () => loadTxns(store.txnCursor));
+
+  // ------------------------------------------------------------ admin
+  const adminWallet = () => "/admin/wallets/" + $("adminUserId").value.trim();
+
+  on("btnGrant", async () => {
+    await api("POST", adminWallet() + "/credits", {
+      headers: { "Idempotency-Key": $("adminIdem").value.trim() },
+      body: {
+        amount_micros: Number($("adminAmount").value),
+        bucket: $("adminBucket").value,
+        note: $("adminNote").value,
+      },
+    });
+    toast("Kredit berildi");
+    await walletNow();
+  });
+
+  on("btnBalance", async () => renderWallet(await api("GET", adminWallet())));
+  on("btnFreeze", async () => {
+    // `note` majburiy: hisobni nima uchun to'xtatganini keyin kimdir so'raydi.
+    await api("POST", adminWallet() + "/freeze", { body: { note: $("adminNote").value || "dev-ui" } });
+    await walletNow();
+  });
+  on("btnUnfreeze", async () => { await api("POST", adminWallet() + "/unfreeze"); await walletNow(); });
+  on("btnReconcile", async () => {
+    const data = await api("POST", "/admin/reconcile");
+    $("reconcileOut").innerHTML = `<div class="card"><h3>Reconcile</h3><pre style="margin:0;font:11.5px/1.5 var(--mono);white-space:pre-wrap">${esc(JSON.stringify(data, null, 2))}</pre></div>`;
+  });
+
+  // ------------------------------------------------------------ start
+  render();
+  if (store.wallet) renderWallet(store.wallet);
+  health();
+  if (store.access) { probeTts(); walletNow().catch(() => {}); }
+})();
+</script>
+</body>
+</html>
