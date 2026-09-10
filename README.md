@@ -695,6 +695,14 @@ docs/
 ├── TTS.md               The speech contract: routes, billing, errors
 └── QUEUEING.md          Where RabbitMQ is used, and where it deliberately isn't
 devtools/                Scripts for things the API deliberately will not do
+│   └── oauth/           One module per provider, behind one interface
+└── api/
+    ├── deps.py          Session and bearer-token dependencies
+    └── v1/
+        ├── auth.py      Email + password routes
+        └── oauth.py     Provider routes
+
+deploy/                  Release script, systemd unit, one-time server setup
 ```
 
 ## Deployment
@@ -722,6 +730,15 @@ systemctl restart synora-api         # after an .env or code change
 ```
 
 ### Shipping a new version
+
+**Push to `main`.** [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)
+runs the test suite and, only if it is green, SSHes in as the `deploy` user and
+releases that commit. `/opt/synora-backend` is itself the checkout systemd runs,
+so a release is `git reset --hard <sha>`, `pip install -r requirements.txt`,
+restart, and a health check on `127.0.0.1:8010/health` — which, if it fails,
+puts the previous commit back before the run is marked failed.
+
+The same script deploys by hand, so the two paths cannot drift:
 
 ```bash
 # from the project root, on your machine
@@ -751,6 +768,17 @@ needs the old process stopped first.
 The server's `.env` is *not* in that archive and is never overwritten by a
 deploy — it holds the production `JWT_SECRET`, and replacing it would sign out
 every user at once.
+ssh deploy@169.58.183.151 /usr/local/sbin/synora-api-deploy       # deploy main
+ssh deploy@169.58.183.151 'DEPLOY_REF=<sha> /usr/local/sbin/synora-api-deploy'
+```
+
+The server's `.env` and `data/` are gitignored, and the release runs `git clean`
+without `-x`, so neither is ever touched — `.env` holds the production
+`JWT_SECRET`, and replacing it would sign out every user at once.
+
+[`deploy/`](deploy/) holds the release script, the unit file and the one-time
+server setup; [`deploy/README.md`](deploy/README.md) is the full write-up,
+including the `DEPLOY_SSH_KEY` secret the workflow needs.
 
 **If the box runs the batch worker, restart it in the same breath:**
 `systemctl restart synora-api synora-tts-worker`. `synora-tts-worker.service` —
