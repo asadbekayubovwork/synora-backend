@@ -30,7 +30,14 @@ stays "command not found". To skip activation entirely:
 - ReDoc — <http://127.0.0.1:8000/redoc>
 - OpenAPI JSON — <http://127.0.0.1:8000/openapi.json>
 
-Tables are created on startup, so there is nothing to migrate for a first run.
+On the default SQLite URL, tables are created on startup, so there is nothing
+to migrate for a first run. On Postgres — which production requires — Alembic
+owns the schema and `init_db()` deliberately does nothing:
+
+```bash
+alembic upgrade head
+python3 devtools/seed_price_book.py   # prices, so the AI routes can bill
+```
 
 **No mail server needed to develop.** With `SMTP_HOST` unset the code is printed
 to the console, and while `ENVIRONMENT=development` the `register` and
@@ -59,6 +66,37 @@ All under `/api/v1`.
 | `POST` | `/auth/oauth/{provider}/link` | Add a provider to the signed-in account |
 | `DELETE` | `/auth/oauth/{provider}/link` | Remove one |
 | `GET`  | `/health`           | Liveness probe |
+| `GET`  | `/wallet` | Credit balance: spendable, held, and why |
+| `GET`  | `/wallet/transactions` | Every credit movement, newest first, cursor-paginated |
+| `POST` | `/tts/speech` | Synthesise and stream the audio back. Metered |
+| `POST` | `/tts/estimate` | What text would cost, holding nothing |
+| `GET`  | `/tts/voices` | Built-in voices and clones |
+| `POST` | `/tts/voices` | Clone a voice from a 3–30 second clip |
+| `DELETE` | `/tts/voices/{voice_id}` | Remove a clone — for everyone on this deployment |
+| `POST` | `/tts/batch` | Queue a corpus. Priced and held for up front |
+| `GET`  | `/tts/batch` | Your jobs, newest first, cursor-paginated |
+| `GET`  | `/tts/batch/{job_id}` | One job, refreshed against the speech service |
+| `DELETE` | `/tts/batch/{job_id}` | Cancel, and settle at what was produced |
+| `GET`  | `/tts/batch/{job_id}/results` | Per-item results |
+| `GET`  | `/usage` | Your own consumption, by service and metric |
+| `GET`  | `/admin/wallets/{user_id}` | Any user's balance (superuser) |
+| `POST` | `/admin/wallets/{user_id}/credits` | Grant credit by hand (superuser) |
+| `POST` | `/admin/wallets/{user_id}/freeze` | Put a wallet on hold (superuser) |
+| `POST` | `/admin/wallets/{user_id}/unfreeze` | Take it off hold (superuser) |
+| `POST` | `/admin/reconcile` | Check every wallet against its ledger, finish batch jobs past their deadline, and release stranded holds (superuser) |
+
+The AI microservices talk to a separate surface, **not** under `/api/v1`:
+
+| Method | Path | |
+| ------ | ---- | --- |
+| `GET`  | `/internal/v1/health` | Readiness, published price version, our clock |
+| `POST` | `/internal/v1/debug/echo-signature` | Shows the string we signed (dev/staging only) |
+
+These are HMAC-signed rather than bearer-authenticated, and they sit outside
+`API_PREFIX` so nginx can allowlist `location /internal/` at the edge — a
+path-prefix ACL being much harder to get wrong than a list of route names. The
+contract the other team codes against, including reference signers in Python
+and Node, is [docs/INTERNAL_API.md](docs/INTERNAL_API.md).
 
 ### The registration flow
 
@@ -214,6 +252,220 @@ Every non-2xx body has the same shape:
 | `reset_token_used`         | 400 | The password already changed under it |
 | `token_expired` / `token_invalid` | 401 | Bad or stale bearer token |
 | `account_disabled`         | 403 | `is_active` is false |
+| `insufficient_balance`     | 402 | Not enough credit; body carries `shortfallMicros` |
+| `wallet_frozen`            | 403 | On hold after a reversal or an admin action |
+| `wallet_not_found`         | 404 | Admin route, and that user has no wallet |
+| `wallet_busy`              | 409 | Too many concurrent writes to one wallet; retry |
+| `price_book_missing`       | 503 | Nothing is published, so nothing can be billed |
+| `cursor_invalid`           | 400 | Malformed pagination cursor |
+| `idempotency_key_required` | 400 | An admin money route was called without the header |
+| `admin_required`           | 403 | Not a superuser |
+| `signature_missing`        | 401 | An internal request arrived unsigned |
+| `signature_invalid`        | 401 | The HMAC does not match |
+| `signature_timestamp_skew` | 401 | Caller's clock is out; body carries `serverTime` |
+| `signature_nonce_invalid`  | 401 | Nonce is not 16–128 URL-safe characters |
+| `signature_replayed`       | 401 | That nonce was already used |
+| `service_key_unknown` / `_revoked` / `_expired` | 401 | Which is which matters when you are reading a log at 3am |
+| `service_key_forbidden`    | 403 | The key lacks the scope for this route |
+
+## Credits and the wallet
+
+The AI services are metered and paid for from a prepaid balance. Everything
+about how that balance is stored follows from one decision: **money is an
+integer count of micro-credits**, and
+
+```
+1 credit = 1 000 000 micros
+```
+
+That scale is not arbitrary. A single LLM token can cost a small fraction of a
+credit, so charges routinely land in the hundreds of micros; a coarser unit
+would round individual events to zero. And integers rather than `NUMERIC` or a
+float because a balance that can drift is a balance you cannot reconcile —
+SQLite round-trips `NUMERIC` through a C double, and `0.1 + 0.2` is why no
+JavaScript client should be doing arithmetic on a parsed amount either. Every
+API response therefore carries both: `available_micros` to compute with, and
+`available` as a fixed-point string to display.
+
+Som is equally integral: UZS is carried in **tiyin** (1 UZS = 100 tiyin), and
+the two only meet at a top-up, whose exchange rate is recorded on the row that
+used it — so a two-year-old receipt is still explicable after the price of a
+credit has changed three times.
+
+### Three counters, not one
+
+| | |
+| --- | --- |
+| `paid_micros` | Bought with money. Never expires. |
+| `bonus_micros` | Granted — a welcome credit, a campaign, a goodwill gesture. Can expire, and is **spent first** for exactly that reason. |
+| `reserved_micros` | Committed to a session that has not settled yet. Held, not spent. |
+
+```
+available = paid + unexpired bonus - reserved
+```
+
+The reserve is what stops two concurrent calls from spending the same som. A
+session takes a hold before it starts, tops it up as it runs, and gives back
+whatever it did not use. Expired bonus stops counting the instant it lapses,
+not whenever a cleanup job next runs.
+
+### Every movement is on the ledger
+
+`ledger_entries` is append-only, and that is enforced by a database trigger
+rather than by review — a correction is a new entry, so history never moves.
+The invariant is
+
+```
+wallets.<bucket>_micros == SUM(ledger_entries.amount_micros for that bucket)
+```
+
+and it holds because `app/services/billing/wallet_repo.py` is the only code
+permitted to move a balance, writing the wallet and its ledger rows in one
+transaction. A test walks the source tree to keep that true, and
+`POST /admin/reconcile` checks it against the live data.
+
+One operation can write more than one row: a charge that takes the last of a
+bonus and the rest from paid credit writes one of each. Rows sharing a
+`group_id` were written together and record the same resulting balance, so
+group on it to show one line per operation.
+
+### Running out mid-call
+
+A charge that exceeds the balance is refused with **402** and a
+`shortfallMicros` field, so the client can say how much to top up instead of
+making the user guess.
+
+A *live* call is different — cutting someone off mid-sentence because the
+balance crossed zero between two heartbeats is a bad experience for the sake of
+a few micros. So the caller is warned, then gets `BILLING_GRACE_SECONDS` and
+`BILLING_GRACE_MICROS` of overrun, and then the call ends cleanly with a
+reason. The overrun is **written off, not lent**: a prepaid product should not
+acquire a debt nobody will collect, and refusing to let a balance go negative
+keeps the strongest constraints in the schema intact. A write-off moves no
+money, so it appears on a counter and not on the ledger.
+
+### Prices are data, not configuration
+
+Prices live in the database, versioned and immutable once published, and are
+changed by publishing a new version — never by editing one. A session pins the
+version it opened under, so a price published mid-call cannot re-rate a call
+already in progress, and an invoice from March is still reproducible in
+December. The som-per-credit rate is versioned separately, so changing what a
+character costs does not silently reprice every top-up in flight.
+
+A fresh install has no prices and will refuse to bill (`503
+price_book_missing`) rather than guess. For local work:
+
+```bash
+python3 devtools/seed_price_book.py          # placeholder numbers
+python3 devtools/seed_price_book.py --show   # what is published
+```
+
+**Those numbers are placeholders.** Replace them before anyone is charged.
+
+### Admin access
+
+The admin routes move real money, so `users.is_superuser` is not settable
+through the API — there is no promote-yourself endpoint. It is a column rather
+than an `ADMIN_EMAILS` allowlist because a Telegram-only account has no email
+and could never be an admin, because an email allowlist would turn a future
+"change my email" endpoint into privilege escalation, and because every action
+needs attributing to a real user id, which the ledger records alongside the
+required `note`.
+
+```bash
+python3 devtools/set_superuser.py ali@example.com
+python3 devtools/set_superuser.py --list
+```
+
+## Text to speech
+
+The speech service runs on its own box with its own GPU, and this API sits in
+front of it as a **gateway** rather than a wrapper. The upstream `sk_live_…`
+key never leaves this process; a signed-in user calls `/api/v1/tts/speech` with
+their own JWT, we price their text, hold the credit, stream the audio through
+and settle.
+
+Handing that key to the frontend instead would be one line of code and would
+put metering — which is the entire product — in the browser's hands. It would
+also make "what did this cost?" answerable only from a header the upstream box
+happens to send, rather than from `usage_events` in our own database. The price
+of the gateway is one more hop and one more place a request can fail; that is
+why every upstream failure is mapped to one of a handful of stable codes in a
+single function, and why `docs/TTS.md` exists.
+
+```bash
+curl -X POST "$API/tts/speech" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -D - -o hello.mp3 \
+  -d '{"text":"Salom! Bugungi ob-havo haqida qisqacha aytib beraman."}'
+
+# → 200, audio/mpeg, and the bill on the headers:
+#   x-synora-session-id: 6f1c9de7-…   x-synora-characters: 53
+#   x-synora-price-micros: 250000     x-synora-price: 0.250000
+```
+
+### Billed by the character, and the whole text
+
+Synthesis is priced on `tts_characters` and nothing else — the one quantity a
+caller can count before spending anything. Because the entire input is in the
+request body before any work starts, the price is known *before* the request
+goes upstream: the hold is the price rather than a guess at it, the settlement
+can never exceed the hold, and our own `200` can carry the final amount on its
+headers.
+
+That is also why **a client that hangs up mid-stream still pays for the whole
+text.** The quote a caller sees before it commits is only worth having if it is
+also the amount it pays, and by the time any audio is moving every character
+has already gone to the GPU, so disconnecting saves no work. The one escape is
+the honest one: if not a single byte of audio reaches us, the session is
+abandoned, the hold goes back in full and nothing is charged.
+
+Audio duration is measured and reported and never priced. The price book has no
+`tts`/`tts_audio_ms` row, and `price_cumulative` raises on an unpriced metric
+with a quantity above zero — so reporting seconds "for the dashboard" would not
+mis-price a call, it would fail the settlement inside a `finally` where nobody
+is left to catch it.
+
+`POST /tts/estimate` prices text through the same call the charge uses, against
+the same active price book, so the two cannot disagree by construction.
+
+### Batch, and the queue that is optional
+
+`POST /tts/batch` takes up to 500 clips, prices and holds for the whole job at
+creation — a `402` before any GPU time is spent, rather than an hour into the
+work — and settles at what the speech service reports having *actually*
+synthesised, which is lower whenever items failed.
+
+With `RABBITMQ_URL` set, the job is published and a worker
+(`python -m app.workers.tts_batch`) submits and polls it. Without one, the
+creating request submits it inline and reading `GET /tts/batch/{job_id}` is
+what advances it. Both paths call the same two service functions, deliberately:
+if the route billed anything of its own, a deployment would charge different
+amounts depending on whether RabbitMQ happened to be running, and nobody would
+find that from an invoice.
+
+The broker is there for admission control in front of a single GPU —
+`RABBITMQ_PREFETCH` is the number of batch items in flight against the card —
+and not because "async is nicer". It is deliberately absent from the streaming
+path, where a queue hop would eat most of a 180 ms first-audio budget, and from
+the wallet ledger, where a debit behind a queue is not a debit but a promise of
+one. [docs/QUEUEING.md](docs/QUEUEING.md) is that argument in full, with the
+topology and the worker's runbook.
+
+### Reading further
+
+| | |
+| --- | --- |
+| [docs/TTS.md](docs/TTS.md) | The integration contract: every route with a curl example, what is billed and when, the `402` shape, the error-code table |
+| [docs/QUEUEING.md](docs/QUEUEING.md) | Where RabbitMQ is used, where it is refused, and how to run the worker |
+| `/docs` | The Swagger page, where every route's failure modes are written out |
+
+Leave `TTS_BASE_URL` or `TTS_API_KEY` empty and every `/tts` route answers
+`503 tts_not_configured`; nothing else in the API changes. Setting one without
+the other is refused at boot outside development, for the same reason a
+half-configured OAuth provider is: a surface that advertises itself as
+available and then fails on first use is worse than one that is plainly off.
 
 ## The Nuxt frontend
 
@@ -302,6 +554,22 @@ Everything lives in `.env`; see [.env.example](.env.example) for the full list.
 | `EXPOSE_DEV_OTP` | `true` | Ignored unless `ENVIRONMENT=development` |
 | `SMTP_HOST` | unset | Unset ⇒ codes are logged, not sent |
 | `CORS_ORIGINS` | `http://localhost:3000,…` | Comma separated |
+| `REDIS_URL` | unset | Unset ⇒ every cache falls back to Postgres. Required with `WORKER_COUNT > 1` |
+| `REDIS_PREFIX` | `synora:` | The box hosts other projects; namespace everything |
+| `WORKER_COUNT` | `1` | Declared, not detected. Only used to refuse a multi-worker boot without Redis |
+| `BILLING_SIGNUP_BONUS_MICROS` | `0` | Welcome credit. `0` disables it |
+| `BILLING_LOW_BALANCE_MICROS` | `0` | Below this, the wallet reports `is_low` |
+| `BILLING_GRACE_SECONDS` / `_MICROS` | `30` / `5000000` | How far a live call may overrun before it is cut. Written off, not lent |
+| `BILLING_HOLD_SECONDS` | `120` | How much of a realtime session to reserve up front |
+| `BILLING_ROLLUP_TIMEZONE` | `Asia/Tashkent` | Local day boundary for usage reports |
+| `TTS_BASE_URL` / `TTS_API_KEY` | unset | Unset ⇒ every `/tts` route answers `503`. One without the other is refused at boot. Full list in [docs/TTS.md](docs/TTS.md#configuration) |
+| `RABBITMQ_URL` | unset | Unset ⇒ batch jobs are submitted inline and polled when read. See [docs/QUEUEING.md](docs/QUEUEING.md) |
+| `RABBITMQ_PREFETCH` | `4` | Batch items in flight against the single GPU. A ceiling, not a throughput knob |
+
+Prices are deliberately **not** in here. They live in the database, versioned,
+and are published through the admin API — so changing what a character costs
+needs no deploy, and every old invoice stays reproducible. Same for the
+som-per-credit rate. See [Credits and the wallet](#credits-and-the-wallet).
 
 Outside `ENVIRONMENT=development` the app refuses to start if `JWT_SECRET` is
 still the default or shorter than 32 bytes, if `CORS_ORIGINS` is `*`, if a
@@ -309,6 +577,12 @@ provider has an id but no secret (the button would appear and then fail), or if
 `OAUTH_REDIRECT_URIS` allows any target — signing tokens with a guessable
 secret lets anyone mint a session, and an open redirect list turns a leaked
 client id into a code thief. Generate a secret with `openssl rand -hex 32`.
+
+It also refuses to start on a **SQLite** `DATABASE_URL`, or with
+`WORKER_COUNT > 1` and no `REDIS_URL`. Both are money-safety checks rather than
+tidiness: SQLite ignores `SELECT ... FOR UPDATE` silently, and a second worker
+without Redis would run the background reaper twice and deliver balance events
+to whichever worker the browser happened to connect to.
 
 Where the provider credentials come from is written up in
 [.env.example](.env.example), next to each block.
@@ -320,24 +594,75 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-77 tests cover both registration steps, the resend cooldown, the attempt cap,
-login, token handling, the password reset, the three OAuth providers
-(signature checks and account matching included) and the OpenAPI schema. The
-provider round-trips are stubbed at `identity_from_code`, so the suite needs no
-network and no real credentials.
+Over 300 tests cover both registration steps, the resend cooldown, the attempt
+cap, login, token handling, the password reset, the three OAuth providers
+(signature checks and account matching included), the OpenAPI schema, the
+credit system — pricing arithmetic, the wallet, the ledger invariant,
+reconciliation, pagination and the HTTP surface — and the speech gateway:
+what a stream charges when the client hangs up, what it charges when nothing
+arrives, the idempotency guard, the batch lifecycle end to end, and the
+inline no-broker path. The provider round-trips are stubbed at
+`identity_from_code` and the speech service at the transport, so the suite
+needs no network and no real credentials.
+
+Five of them are skipped by default. Concurrency cannot be tested on SQLite —
+its writers serialise at the file and `with_for_update()` compiles to nothing —
+so a "twenty callers race for eight credits" test there would pass while
+proving nothing at all. Point the suite at a real Postgres to run them:
+
+```bash
+createdb synora_api_test
+TEST_DATABASE_URL=postgresql+asyncpg://synora_api:synora_api@localhost/synora_api_test pytest
+```
+
+Worth doing before anything touching money ships, and worth having as a second
+CI job. Everything else passes on both.
+
+**One database per run.** `clean_database` drops and recreates the whole schema
+before every test, so two pytest processes sharing a Postgres database would
+tear each other's tables down mid-test. On Postgres the fixture takes an
+advisory lock for the duration of each test, so a second process queues instead
+of interleaving — which matters because the failures that interleaving produces
+look nothing like the cause: rows vanishing between two statements, a duplicate
+key on an email the test just created, and a different test failing each run.
+
+**Redis is not needed to run the tests.** `REDIS_URL` is empty in `conftest.py`
+on purpose, so the whole suite exercises the Postgres fallback — a fallback
+nobody runs is a fallback that does not work. The Redis-specific behaviour is
+driven through a stub client in `tests/test_cache.py`, which is the better test
+anyway: a stub can be made to fail on command, and "what happens when Redis
+disappears mid-request" is the half that matters.
+
+To exercise the real thing by hand:
+
+```bash
+brew install redis && redis-server --daemonize yes
+REDIS_URL=redis://localhost:6379/0 uvicorn app.main:app --reload
+```
+
+`GET /internal/v1/health` then reports `redis: "up"` and `state: "ready"`, and
+replaying an identical signed request gets `401 signature_replayed`. Stop Redis
+and the same request still succeeds, with `state: "degraded"` — the outage is
+logged once, not once per request.
 
 ## Layout
 
 ```
+alembic/                 Migrations. The schema authority — see alembic/README
 app/
 ├── main.py              FastAPI app, CORS, lifespan, Swagger metadata
 ├── core/
 │   ├── config.py        Settings from .env
 │   ├── security.py      bcrypt, OTP generation, JWT
-│   └── exceptions.py    Typed errors + the shared error body
-├── db/                  Declarative base and the async session
-├── models/              User, OtpCode, OAuthAccount
+│   ├── exceptions.py    Typed errors + the shared error body
+│   ├── money.py         Micro-credits: the one money unit, and its arithmetic
+│   ├── signing.py       HMAC request signing for the microservices
+│   ├── cache.py         Redis, and the Postgres-shaped hole where Redis isn't
+│   └── broker.py        RabbitMQ, or nothing: admission control for one GPU
+├── db/                  Declarative base, naming convention, async session
+├── models/              User, OtpCode, OAuthAccount, billing tables, tts jobs
 ├── schemas/             Request/response models (also the Swagger examples)
+│   └── common.py        The cursor-pagination convention
 ├── services/
 │   ├── auth_service.py  register / verify / login / password reset
 │   ├── otp_service.py   Code lifecycle
@@ -401,23 +726,119 @@ without `-x`, so neither is ever touched — `.env` holds the production
 server setup; [`deploy/README.md`](deploy/README.md) is the full write-up,
 including the `DEPLOY_SSH_KEY` secret the workflow needs.
 
+**If the box runs the batch worker, restart it in the same breath:**
+`systemctl restart synora-api synora-tts-worker`. `synora-tts-worker.service` —
+the unit is in [docs/QUEUEING.md](docs/QUEUEING.md#on-the-server) — is a second
+process running `python -m app.workers.tts_batch` out of the same directory and
+the same `.env`, and it settles batch jobs with the same code the API does.
+Restarting only the API leaves the previous release's billing path consuming
+from the queue against the new schema. Nothing new goes in the tarball for it:
+`app` already carries the worker. The unit exists only where `RABBITMQ_URL` is
+set; without a broker there is nothing for it to consume and it refuses to
+start.
+
 ### Still to do
 
-- **Back up `data/synora.db`.** Nothing copies it anywhere yet; losing the disk
-  loses every account.
-- **One worker only**, because SQLite serialises writers. Adding workers means
-  moving to Postgres first — and Postgres means Alembic, since `init_db()` only
-  creates missing tables.
+- **Move production to Postgres.** This is now a hard requirement rather than a
+  preference: the app refuses to boot outside development on a SQLite
+  `DATABASE_URL`. SQLite serialises writers, ignores `SELECT ... FOR UPDATE`
+  silently, and is not a database to keep money in. `asyncpg` is already
+  pinned, so it is a URL change plus `alembic upgrade head`.
+- **Back the database up, and rehearse the restore.** Nothing copies it
+  anywhere yet. Losing the users table lost accounts; losing the wallets table
+  loses money that is owed. `pg_dump` on a timer with off-box retention, and a
+  restore somebody has actually performed once.
+- **One worker still.** Going to two needs `REDIS_URL` set — the background-job
+  lease and the balance event stream both need somewhere shared to coordinate —
+  and `assert_production_ready()` refuses to start with `WORKER_COUNT > 1` and
+  no Redis, rather than letting the reaper run twice and the events go missing.
+- **Watch for top-ups stuck in `paid`.** A row that reached `paid` but not
+  `credited` for more than a minute means money arrived and credit did not.
+  `journalctl -u synora-api | grep topup_credit_pending`.
+- **Give the speech service a stable hostname.** The `TTS_BASE_URL` in
+  `.env.example` is a `trycloudflare.com` quick tunnel, and those change every
+  time the tunnel restarts. A changed URL is `502 tts_unreachable` on every
+  synthesis, with nothing wrong on either box. A real DNS name and a persistent
+  tunnel — or the GPU box behind our own nginx — before anyone depends on it.
+- **Nothing runs `POST /admin/reconcile` on a schedule.** It is the only caller
+  of the session reaper, and the reaper is what gives back a hold left behind by
+  a process that died between placing it and settling — a client gone before the
+  response body started, a settlement that failed on a dead connection, a worker
+  killed mid-charge. It is now also the only caller of the batch sweeper, so
+  **both** backstops in this system are waiting on the same missing timer. A
+  stranded hold does not expire on its own: it waits to be noticed, and the
+  customer's credit is frozen the whole time. Until it is on a timer — a cron
+  calling the route, or an in-process job behind the same Redis lease
+  `WORKER_COUNT > 1` already needs — "run it after anything unusual" is the only
+  policy there is, and nobody knows when something unusual happened.
+- **The batch sweeper exists; nothing puts it on a timer.**
+  `TTS_BATCH_MAX_POLL_SECONDS` used to be reachable only from
+  `tts_batch_service.refresh_job` — a worker's poll, or a read of
+  `GET /tts/batch/{job_id}` — so with no worker and no reader (a dead-lettered
+  submit, a client that gave up) the credit was held forever. It is now also
+  reachable from `tts_batch_service.sweep_stale_jobs`, which `POST
+  /admin/reconcile` calls beside the wallet passes. That sweep is a pass of its
+  own because the reconcile *reaper* deliberately refuses to be this backstop:
+  it skips any metered session a non-terminal batch job points at, since the
+  session's clock starts when it was opened and the job's when upstream accepted
+  it, and a reaper acting on the earlier of the two was closing the sessions of
+  healthy jobs and settling them at zero. It is composed at the route rather
+  than inside `reconcile_service` for a second reason worth keeping: a billing
+  module importing from `app/services/ai/` would invert the layering. So a
+  stranded batch hold is recoverable now rather than permanent — but only as
+  often as somebody calls that route, which is the bullet above. Until that is
+  done, the backstop is a person.
+- **No batch worker runs in production yet.** RabbitMQ is not installed on the
+  box, so `RABBITMQ_URL` is empty and every batch job is submitted inline by the
+  request that creates it and advanced only when someone reads it. That is a
+  supported configuration and the whole batch path is built for it — but it
+  means nothing limits how many jobs hit the single GPU at once, and the
+  stranded-hold point above applies in full. `synora-tts-worker.service` is
+  written out in [docs/QUEUEING.md](docs/QUEUEING.md#on-the-server) and is not
+  installed anywhere; nothing new goes in the release tarball for it, since
+  `app` already carries the worker. Install the broker, the unit and
+  `RABBITMQ_URL` when batch traffic stops being occasional.
+- **RabbitMQ and Redis are both optional, and both stop being optional at the
+  second box.** Without a broker the hand-over to the speech service happens
+  inline on the creating request: correct on one machine, wrong on two, because
+  admission control in front of a single GPU is exactly the thing that cannot be
+  per-process. Without Redis the per-account synthesis cap counts nothing at all
+  — `NullCache.increment` returns zero, so `TTS_MAX_CONCURRENT_PER_USER` is off
+  rather than enforced — and `assert_production_ready()` already refuses
+  `WORKER_COUNT > 1` without it. Neither is a bug on today's single-box
+  deployment. Both are prerequisites for the next one, and the concurrency cap
+  being silently absent is worth knowing before it is quoted to anybody.
+- **`Idempotency-Key` does not cover the retry people mean.** On `/tts/speech`
+  it collapses a retry that *races* the original and nothing else: once that
+  synthesis has ended — settled, or abandoned after an upstream refusal — the key
+  is spent and comes back `409 tts_idempotency_spent`. The route description and
+  [docs/TTS.md](docs/TTS.md) now say so plainly, which is the honest fix and not
+  the complete one. Making a key answer the ordinary "my connection dropped, is
+  it done?" needs somewhere to keep the outcome — at minimum the session id,
+  character count and price, so a spent key can be answered with the original
+  bill instead of a refusal; at most the audio itself, which is megabytes of a
+  customer's content per call and a retention decision nobody has made. Until
+  then, clients must branch on the code rather than retry blindly.
+- **Batch audio has nowhere to be fetched from.** `GET /tts/batch/{job_id}/results`
+  returns the speech service's own storage paths, not URLs this API serves, so
+  a client can see that a clip rendered and cannot download it. Serving them
+  needs a decision about where the files live and who pays for the egress; until
+  then, the paths are for support requests.
 
 ## Notes for production
 
-- **Migrations.** `init_db()` only creates missing tables; it will not alter
-  existing ones. Add Alembic before the schema changes under real data.
-  **This applies to the OAuth work:** `users.email` and `users.password_hash`
-  became nullable and `full_name` / `avatar_url` were added, and an existing
-  database will not pick any of that up. On the current SQLite deploy the
-  quickest honest fix is to recreate `data/synora.db` (it holds test accounts
-  only); with real data, write the `ALTER TABLE`s first.
+- **Migrations.** Alembic is the schema authority now. `init_db()` still
+  exists, but it only runs when `DATABASE_URL` is SQLite — it creates missing
+  tables for local work and for the test suite, and it can never alter one.
+  On anything else it logs and does nothing, because creating tables Alembic
+  does not know about and then never altering them again is the failure mode
+  it used to have.
+  Revision `0001` reproduces the pre-Alembic auth schema exactly, so a fresh
+  database and a stamped one converge. An **already-deployed** database is
+  brought under Alembic with `alembic stamp 0001` and then `alembic upgrade
+  head` — but note it will carry database-picked constraint names rather than
+  the `pk_users` / `fk_…` convention the models now declare, which only matters
+  the day a migration wants to drop one of them by name.
 - **Refresh tokens are stateless.** They stay valid until they expire — there is
   no revocation list, so "log out everywhere" needs a stored token id or a
   per-user token version.
@@ -429,3 +850,35 @@ including the `DEPLOY_SSH_KEY` secret the workflow needs.
   before they can receive any mail from us.
 - **Rate limiting** covers OTP issuance only. Login is not throttled; put a
   limiter (nginx, Redis) in front of it before going public.
+- **The ledger is append-only, and a trigger enforces it.** Not review — an
+  actual `BEFORE UPDATE OR DELETE` trigger, so a psql session cannot quietly
+  fix a row either. If a balance is wrong, post a correcting entry; the history
+  is the only evidence of how it got wrong.
+- **`ON DELETE RESTRICT` on the money tables is deliberate.** `DELETE FROM
+  users` now fails for anyone who ever held credit, which makes deleting an
+  account an anonymise-in-place operation rather than a row removal. That is
+  correct for financial records and it needs a product and legal decision
+  before anyone builds a delete-my-account button on top of it.
+- **Reconciliation runs on demand, not yet on a timer.** `POST
+  /admin/reconcile` is the check; wiring it to a schedule is part of the
+  background-jobs work. Until then, run it after anything unusual. It releases
+  reserved credit that no live session claims — a leaked hold silently freezes
+  a paying customer's money — but never touches a balance that disagrees with
+  its ledger, because that needs a human and the number is the evidence.
+  Two exclusions are worth knowing before treating it as a catch-all. It leaves
+  alone a session that is *still making progress*, because a streaming response
+  is paced by whoever is reading it and a deadline on starting is not a deadline
+  on finishing. And it leaves alone any session a non-terminal batch job points
+  at, because that job's own deadline is the one that owns it — reaping on the
+  session's earlier clock was closing healthy jobs and settling them at zero.
+  That second exclusion is why the route runs a pass the reconciler does not
+  own: `tts_batch_service.sweep_stale_jobs` finishes jobs past their *own*
+  deadline, reported as `swept`, and it is called from the route beside
+  `reconcile_all` rather than from inside it so that the billing layer never
+  imports the AI services. What is left in **Still to do** is the timer both
+  passes are waiting on.
+- **A write-off is not on the ledger.** When a live call overruns into grace,
+  the uncollected part lands on `wallets.lifetime_writeoff_micros` and writes
+  no entry, because no credit moved. It is the one denormalised counter
+  reconciliation deliberately does not check, and that is worth knowing before
+  someone "fixes" the omission.
