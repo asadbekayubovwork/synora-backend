@@ -814,6 +814,146 @@ through the admin API — see
 
 ---
 
+## Trying it locally
+
+Every step below has been run start to finish against the real speech box. It
+touches neither your `.env` nor your working database — a throwaway env file
+and its own SQLite file, so a mistake here costs `rm /tmp/local.db`.
+
+```bash
+cat > /tmp/local.env <<'EOF'
+ENVIRONMENT=development
+DATABASE_URL=sqlite+aiosqlite:////tmp/local.db
+JWT_SECRET=local-dev-secret-that-is-long-enough-for-hmac
+INTERNAL_KEY_SECRET=local-internal-secret-long-enough-for-hmac
+EXPOSE_DEV_OTP=true
+SMTP_HOST=
+REDIS_URL=
+TTS_BASE_URL=https://your-speech-box.example
+TTS_API_KEY=sk_live_...
+EOF
+set -a; . /tmp/local.env; set +a
+
+.venv/bin/alembic upgrade head
+.venv/bin/python devtools/seed_price_book.py --uzs-per-credit 150
+.venv/bin/uvicorn app.main:app --port 8099
+```
+
+`ENVIRONMENT=development` is doing more than it looks: it is what lets
+`assert_production_ready()` accept a SQLite URL and a guessable secret, and what
+makes `register` hand the verification code back in the response instead of
+mailing it. Neither is true anywhere else, which is the point.
+
+Two lines at startup say whether the configuration took. Read them before
+debugging anything else — half a configuration is the commonest mistake here,
+and both of these failures are otherwise silent until the first request:
+
+```
+synora: TTS gateway: https://your-speech-box.example
+synora: Batch queue: not configured (batch jobs submit inline)
+```
+
+`not configured (speech routes answer 503)` means `TTS_BASE_URL` or
+`TTS_API_KEY` did not reach the process.
+
+### An account with credit in it
+
+There is no promote-yourself endpoint and no fund-yourself endpoint, on
+purpose — both move real money — so the first admin is made from a shell.
+
+```bash
+API=http://127.0.0.1:8099/api/v1
+
+# The response carries `dev_code`, because EXPOSE_DEV_OTP is on.
+curl -s -X POST "$API/auth/register" -H 'Content-Type: application/json' \
+  -d '{"email":"ali@example.com","password":"Str0ngPassw0rd"}'
+
+# Verifying activates the account and already returns the token pair.
+curl -s -X POST "$API/auth/verify-otp" -H 'Content-Type: application/json' \
+  -d '{"email":"ali@example.com","code":"<dev_code>"}'
+
+.venv/bin/python devtools/set_superuser.py ali@example.com
+
+curl -s -X POST "$API/admin/wallets/$USER_ID/credits" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: local-1' \
+  -d '{"amount_micros":10000000,"bucket":"paid","note":"local testing"}'
+```
+
+**In zsh, do not call the shell variable `UID`.** It is read-only, and the
+assignment fails with a parse error several lines away from the cause.
+`USER_ID` is fine.
+
+### The calls, and what they should say
+
+```bash
+A="Authorization: Bearer $TOKEN"
+
+# Costs nothing, charges nothing, touches no wallet.
+curl -s -X POST "$API/tts/estimate" -H "$A" -H 'Content-Type: application/json' \
+  -d '{"text":"Assalomu alaykum, bugun havo juda yaxshi."}'
+# → {"characters":41,"price":"0.250000","sufficient_credit":true,...}
+
+curl -s -D- -X POST "$API/tts/speech" -H "$A" -H 'Content-Type: application/json' \
+  -d '{"text":"Assalomu alaykum, bugun havo juda yaxshi.","format":"wav"}' \
+  -o /tmp/out.wav
+# → x-synora-characters: 41
+#   x-synora-price: 0.250000
+#   x-synora-session-id: cba9a8e6-…
+#   content-type: audio/wav      /tmp/out.wav is 307 244 bytes, starting `RIFF`
+
+curl -s "$API/usage" -H "$A"
+# → tts/tts_characters qty=41 events=1 price=0.250000
+
+curl -s "$API/wallet" -H "$A"
+# → available 9.750000   reserved 0.000000
+
+curl -s "$API/wallet/transactions?limit=3" -H "$A"
+# → hold +0.250000 · release -0.250000 · debit -0.250000
+```
+
+**`reserved` back at zero is the assertion worth making every time.** A charge
+that is a little wrong is a bug; a hold that never came back is credit the
+customer cannot spend and nothing will notice, because a live session's hold
+looks legitimate to reconciliation. If it stays non-zero, the session did not
+finish — `POST /admin/reconcile` is what recovers it.
+
+A user with an empty wallet gets the shape a top-up dialog is built on:
+
+```json
+{ "code": "insufficient_balance", "requiredMicros": 250000,
+  "availableMicros": 0, "shortfallMicros": 250000 }
+```
+
+### Batch, with no broker
+
+```bash
+curl -s -X POST "$API/tts/batch" -H "$A" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: book-1' \
+  -d '{"items":[{"id":"bob1","text":"Birinchi bob."},
+                {"id":"bob2","text":"Ikkinchi bob."}],"format":"wav"}'
+# → state "submitted" immediately: with no RABBITMQ_URL the request itself
+#   hands the job to the speech service.
+
+curl -s "$API/tts/batch/$JOB_ID" -H "$A"
+```
+
+**Reading the job is what advances it.** Without a worker there is nothing else
+to poll upstream, so a job left unread stays where it is — poll the route rather
+than waiting. Four reads took the example above from `submitted` to `succeeded`
+with `billed_characters: 54` and `settled: "0.250000"`.
+
+### One thing that will trip you up
+
+`format` and `audio_format` are both accepted. The field is `audio_format`
+because `format` is a Python builtin, but upstream and every example anyone has
+read call it `format`, and Pydantic drops an unknown key without a word — so
+before the alias existed, `{"format": "wav"}` quietly returned mp3 and the only
+way to find out was to read the first four bytes. If audio ever comes back in a
+format you did not ask for, check the field name first.
+
+---
+
 ## Checking the plumbing
 
 ```bash

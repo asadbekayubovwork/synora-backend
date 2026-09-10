@@ -458,6 +458,7 @@ topology and the worker's runbook.
 | | |
 | --- | --- |
 | [docs/TTS.md](docs/TTS.md) | The integration contract: every route with a curl example, what is billed and when, the `402` shape, the error-code table |
+| [Trying it locally](docs/TTS.md#trying-it-locally) | Zero to a synthesis you paid for: a throwaway database, a funded account, and what each response should say |
 | [docs/QUEUEING.md](docs/QUEUEING.md) | Where RabbitMQ is used, where it is refused, and how to run the worker |
 | `/docs` | The Swagger page, where every route's failure modes are written out |
 
