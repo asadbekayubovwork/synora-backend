@@ -119,6 +119,22 @@ class Settings(BaseSettings):
     tts_batch_poll_seconds: int = 10
     tts_batch_max_poll_seconds: int = 21_600
 
+    # --- Recordings --------------------------------------------------------
+    # Keep every delivered synthesis: its text and parameters in
+    # `tts_recordings`, its audio in a content-addressed file under the
+    # directory below. Nothing on the billing path reads either, and a failure
+    # to write one costs a recording rather than a synthesis — see
+    # `app/services/ai/recording_store.py`.
+    #
+    # It does mean storing customer text and customer audio indefinitely.
+    # `false` turns the whole thing off; there is no automatic expiry, and
+    # `DELETE /tts/recordings/{id}` is how one user erases one recording.
+    recordings_enabled: bool = True
+    # Relative to the working directory, which is `/opt/synora-backend` under
+    # systemd — inside the unit's one `ReadWritePaths=`, so `ProtectSystem=strict`
+    # does not have to be relaxed for this.
+    recordings_dir: str = "data/recordings"
+
     # --- RabbitMQ ----------------------------------------------------------
     # Optional exactly as Redis is: empty means batch jobs are submitted inline
     # by the request that created them and the worker is not needed. The test

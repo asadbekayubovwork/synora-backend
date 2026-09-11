@@ -78,6 +78,10 @@ All under `/api/v1`.
 | `GET`  | `/tts/batch/{job_id}` | One job, refreshed against the speech service |
 | `DELETE` | `/tts/batch/{job_id}` | Cancel, and settle at what was produced |
 | `GET`  | `/tts/batch/{job_id}/results` | Per-item results |
+| `GET`  | `/tts/recordings` | Every synthesis this account has kept |
+| `GET`  | `/tts/recordings/{id}` | One of them |
+| `GET`  | `/tts/recordings/{id}/audio` | Play it back. Costs nothing |
+| `DELETE` | `/tts/recordings/{id}` | Erase one |
 | `GET`  | `/usage` | Your own consumption, by service and metric |
 | `GET`  | `/admin/wallets/{user_id}` | Any user's balance (superuser) |
 | `POST` | `/admin/wallets/{user_id}/credits` | Grant credit by hand (superuser) |
@@ -468,6 +472,45 @@ the other is refused at boot outside development, for the same reason a
 half-configured OAuth provider is: a surface that advertises itself as
 available and then fails on first use is worse than one that is plainly off.
 
+## Kept syntheses
+
+A synthesis used to leave counters and nothing else: `usage_events` could say a
+wallet paid a quarter of a credit for a thousand characters, and nothing could
+say which thousand or hand the audio back. `tts_recordings` is the other half.
+Every delivered stream writes a row — the exact text, the voice, the format —
+and the audio goes to a file under `RECORDINGS_DIR`, named by the sha256 of its
+own bytes.
+
+```bash
+curl -s "$API/tts/recordings" -H "$A"                       # newest first, cursor-paged
+curl -s "$API/tts/recordings/$ID/audio" -H "$A" -o out.wav  # the same bytes, verifiable
+curl -s -X DELETE "$API/tts/recordings/$ID" -H "$A"         # erase one
+```
+
+Content-addressing is doing real work there. The same text in the same voice is
+the same bytes, so a client that retries stores one file and two rows — and
+deleting a recording therefore deletes the row and only unlinks the file once no
+row names it any more. Unlinking on sight is how one user's delete silently
+empties another user's playback, and the symptom would arrive weeks later as a
+200 with an empty body.
+
+Three things are deliberately not kept: a call upstream refused before the first
+byte, which charged nothing; a retry under a spent `Idempotency-Key`, which
+re-synthesised audio the original already has a row for; and anything at all
+while `RECORDINGS_ENABLED` is false.
+
+Nothing here is on the billing path. `recording_store` swallows its own
+failures, the row is written on its own session after the settlement has
+committed, and a full disk costs a recording rather than a stream somebody is
+paying for — `tests/test_tts_recordings.py` drives exactly that case. Deleting a
+recording changes nothing about the charge either: the ledger and `GET /usage`
+are the record of what was billed, and erasing what was said does not erase that
+it was paid for.
+
+The trade is that this keeps customer text and customer audio indefinitely.
+There is no automatic expiry; `DELETE` is the user's own control, and
+`RECORDINGS_ENABLED=false` is the deployment's.
+
 ## Clicking through it in a browser
 
 Swagger at `/docs` covers most of the API, but `POST /tts/speech` returns audio,
@@ -641,6 +684,7 @@ Everything lives in `.env`; see [.env.example](.env.example) for the full list.
 | `BILLING_HOLD_SECONDS` | `120` | How much of a realtime session to reserve up front |
 | `BILLING_ROLLUP_TIMEZONE` | `Asia/Tashkent` | Local day boundary for usage reports |
 | `TTS_BASE_URL` / `TTS_API_KEY` | unset | Unset ⇒ every `/tts` route answers `503`. One without the other is refused at boot. Full list in [docs/TTS.md](docs/TTS.md#configuration) |
+| `RECORDINGS_ENABLED` / `RECORDINGS_DIR` | `true` / `data/recordings` | Keep the text and the audio of every delivered synthesis. `false` keeps neither |
 | `METRICS_ENABLED` / `METRICS_TOKEN` | `true` / unset | `GET /metrics`. Outside development it answers `404` until a token is set — nginx proxies `location /`, so the endpoint is public the moment it exists |
 | `RABBITMQ_URL` | unset | Unset ⇒ batch jobs are submitted inline and polled when read. See [docs/QUEUEING.md](docs/QUEUEING.md) |
 | `RABBITMQ_PREFETCH` | `4` | Batch items in flight against the single GPU. A ceiling, not a throughput knob |
@@ -749,6 +793,8 @@ app/
 │   ├── oauth_service.py Provider identity -> user, linking, unlinking
 │   ├── oauth/           One module per provider, behind one interface
 │   ├── ai/
+│   │   ├── recording_store.py   Audio files, content-addressed. No rows
+│   │   ├── tts_recording_service.py  Rows for delivered audio, and ownership
 │   │   ├── tts_client.py        The speech box, and nothing else. No money
 │   │   ├── tts_service.py       One metered stream: hold, relay, settle
 │   │   └── tts_batch_service.py A job, its hold and its settlement

@@ -817,6 +817,79 @@ def batch_results_response(job, payload: dict[str, Any]) -> BatchResultsResponse
     )
 
 
+# --- recordings -------------------------------------------------------------
+
+
+class RecordingResponse(_Schema):
+    """One kept synthesis: what was asked for, and what came back.
+
+    The audio itself is a second request — `GET /tts/recordings/{id}/audio` —
+    because a list of twenty-five of these would otherwise be tens of megabytes
+    of base64 that almost every caller throws away.
+    """
+
+    id: uuid.UUID = Field(description="The recording. Use it on the audio and delete routes.")
+    ai_session_id: uuid.UUID = Field(
+        description="The metered session that paid for it, as it appears on the ledger.",
+    )
+    text: str = Field(
+        description="The text that was synthesised, exactly as it was submitted.",
+        examples=["Assalomu alaykum, bugun havo juda yaxshi."],
+    )
+    voice_id: str | None = Field(
+        default=None, description="The voice, or null for the server default."
+    )
+    quality: str = Field(description="`low_latency`, `balanced` or `high_fidelity`.")
+    audio_format: str = Field(description="`mp3`, `wav`, `pcm` or `opus`.")
+    sample_rate: int = Field(description="Samples per second, as requested.", examples=[48000])
+    style: str | None = Field(default=None, description="The style prompt, if one was sent.")
+    characters: int = Field(description="Characters charged for.", examples=[41])
+    audio_bytes: int = Field(description="Bytes of audio delivered.", examples=[307244])
+    audio_ms: int = Field(
+        description=(
+            "Duration, for the formats where bytes and duration are the same "
+            "fact in two units. Zero for `mp3` and `opus`, which are "
+            "variable-bitrate containers -- a plausible-looking wrong number "
+            "would be worse than none."
+        ),
+        examples=[3200],
+    )
+    sha256: str = Field(
+        description="Digest of the audio. The file is stored under it, so it can be verified.",
+    )
+    created_at: datetime
+
+
+class RecordingPageResponse(_Schema):
+    ok: bool = True
+    recordings: list[RecordingResponse]
+    page: PageInfo
+
+
+def recording_response(recording) -> RecordingResponse:
+    """One row, key by key. `body` on the row, `text` on the wire.
+
+    The column is `body` because `text` is `sqlalchemy.text` in every module
+    that touches this table; the field is `text` because that is what the
+    request called it, and a client should not have to learn our column names.
+    """
+    return RecordingResponse(
+        id=recording.id,
+        ai_session_id=recording.ai_session_id,
+        text=recording.body,
+        voice_id=recording.voice_id,
+        quality=recording.quality,
+        audio_format=recording.audio_format,
+        sample_rate=recording.sample_rate,
+        style=recording.style,
+        characters=recording.characters,
+        audio_bytes=recording.audio_bytes,
+        audio_ms=recording.audio_ms,
+        sha256=recording.sha256,
+        created_at=recording.created_at,
+    )
+
+
 # --- usage ------------------------------------------------------------------
 
 

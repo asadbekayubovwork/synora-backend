@@ -133,6 +133,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Coroutine
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -158,6 +159,7 @@ from app.models.billing_enums import (
     UsageMetric,
 )
 from app.models.user import User
+from app.services.ai import recording_store, tts_recording_service
 from app.services.ai import tts_client
 from app.services.billing import reconcile_service, session_service
 from app.services.billing.session_service import Ticket
@@ -462,6 +464,67 @@ async def drain_settlements(timeout: float = DRAIN_TIMEOUT_SECONDS) -> int:
     return len(pending)
 
 
+@dataclass(slots=True)
+class _Capture:
+    """A recording being written, and the request that produced it.
+
+    One object rather than seven more parameters on `_finalise`, and it carries
+    the text because nothing else on that path does: the session row stores a
+    digest, deliberately, and a digest cannot be played back.
+    """
+
+    writer: recording_store.Writer
+    text: str
+    voice_id: str | None
+    quality: str
+    audio_format: str
+    sample_rate: int
+    style: str | None
+
+
+async def _store_recording(
+    capture: _Capture,
+    *,
+    ticket: Ticket,
+    characters: int,
+    delivered_bytes: int,
+    audio_ms: int,
+) -> None:
+    """Move the temporary file into place and write its row. Never raises.
+
+    Its own session, not the settlement's: a recording that cannot be written
+    must not be able to roll back a charge that has already committed, and the
+    two have no reason to share a transaction. Called from `_finalise`, which
+    is documented never to raise and has already been paid for by then.
+    """
+    try:
+        committed = await capture.writer.commit(audio_format=capture.audio_format)
+        if committed is None:
+            return
+        storage_key, digest = committed
+        async with SessionLocal() as session:
+            await tts_recording_service.save(
+                session,
+                user_id=ticket.user_id,
+                ai_session_id=ticket.ai_session_id,
+                body=capture.text,
+                voice_id=capture.voice_id,
+                quality=capture.quality,
+                audio_format=capture.audio_format,
+                sample_rate=capture.sample_rate,
+                style=capture.style,
+                characters=characters,
+                audio_bytes=delivered_bytes,
+                audio_ms=audio_ms,
+                storage_key=storage_key,
+                sha256=digest,
+            )
+    except Exception:  # noqa: BLE001 - a keepsake is never worth a traceback here
+        logger.exception(
+            "recording_failed session=%s bytes=%d", ticket.ai_session_id, delivered_bytes
+        )
+
+
 async def _finalise(
     stack: AsyncExitStack,
     *,
@@ -472,6 +535,7 @@ async def _finalise(
     sample_rate: int,
     end_reason: SessionEndReason,
     error_code: str | None,
+    capture: "_Capture | None" = None,
 ) -> None:
     """Close upstream, then charge for the call. Runs once, whatever happened.
 
@@ -564,6 +628,22 @@ async def _finalise(
     # it exactly once, including the one where opening the response is what
     # failed. A gauge that leaks here reads as syntheses that never end, which
     # is the same shape as the bug it exists to reveal.
+    if capture is not None:
+        if ticket.replayed or not delivered_bytes:
+            # A replay is audio the original already has a row for -- the same
+            # text and the same voice, so the same file -- and a second row
+            # would put the same recording in the list twice for the price of
+            # one. Nothing delivered is nothing to keep.
+            capture.writer.abort()
+        else:
+            await _store_recording(
+                capture,
+                ticket=ticket,
+                characters=characters,
+                delivered_bytes=delivered_bytes,
+                audio_ms=audio_ms,
+            )
+
     metrics.tts_streams_inflight.dec()
     metrics.record_stream(
         end_reason=end_reason.value,
@@ -781,6 +861,23 @@ async def synthesize(
     # `_finalise`, which is what brings the gauge back down.
     metrics.tts_streams_inflight.inc()
 
+    # Opened before the upstream request so the failure path has something to
+    # clean up, and `None` whenever recording is off or the disk refuses --
+    # every use below is guarded on that, and none of them can raise.
+    capture = None
+    if not ticket.replayed:
+        writer = await recording_store.begin()
+        if writer is not None:
+            capture = _Capture(
+                writer=writer,
+                text=text,
+                voice_id=voice_id,
+                quality=quality,
+                audio_format=audio_format,
+                sample_rate=sample_rate,
+                style=style,
+            )
+
     stack = AsyncExitStack()
     try:
         response = await stack.enter_async_context(
@@ -838,6 +935,7 @@ async def synthesize(
                     if isinstance(error, AppError)
                     else "tts_unreachable"
                 ),
+                capture=capture,
             )
         )
         raise
@@ -918,6 +1016,15 @@ async def synthesize(
                 if not chunk:
                     continue
                 delivered += len(chunk)
+                if capture is not None:
+                    # Synchronous, and the module docstring of
+                    # `recording_store` argues the case: a buffered write into
+                    # the page cache costs microseconds, while an `await` here
+                    # would add an event-loop round trip to every chunk of
+                    # every stream. It cannot raise and it cannot block the
+                    # relay -- a broken writer goes quiet and the audio keeps
+                    # moving.
+                    capture.writer.write(chunk)
                 # Progress is stamped on the clock, not on the chunk count:
                 # chunk sizes are upstream's business and the reaper asks a
                 # question about time. `time.monotonic` rather than wall clock
@@ -981,6 +1088,7 @@ async def synthesize(
                     sample_rate=sample_rate,
                     end_reason=end_reason,
                     error_code=error_code,
+                    capture=capture,
                 )
             )
 

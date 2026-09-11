@@ -77,7 +77,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Header, Path, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -101,6 +101,8 @@ from app.schemas.tts import (
     BatchResultsResponse,
     EstimateRequest,
     EstimateResponse,
+    RecordingPageResponse,
+    RecordingResponse,
     RegisterVoiceRequest,
     SynthesizeRequest,
     VoiceListResponse,
@@ -108,10 +110,17 @@ from app.schemas.tts import (
     batch_job_response,
     batch_results_response,
     estimate_response,
+    recording_response,
     voice_list_response,
     voice_response,
 )
-from app.services.ai import tts_batch_service, tts_client, tts_service
+from app.services.ai import (
+    recording_store,
+    tts_batch_service,
+    tts_client,
+    tts_recording_service,
+    tts_service,
+)
 from app.services.billing import session_service, wallet_service
 
 logger = logging.getLogger("synora.tts")
@@ -866,3 +875,160 @@ async def job_results(
     return batch_results_response(
         job, await tts_client.batch_results(job.upstream_job_id)
     )
+
+
+# --- recordings -------------------------------------------------------------
+
+RecordingIdPath = Path(description="A recording id, as `GET /tts/recordings` returned it.")
+
+RECORDING_ERRORS: dict[int | str, dict] = {
+    401: {"model": ErrorResponse, "description": "Unauthorized"},
+    403: {"model": ErrorResponse, "description": "Forbidden"},
+    404: {"model": ErrorResponse, "description": "No such recording"},
+    422: {"model": ErrorResponse, "description": "Validation error"},
+}
+
+
+@router.get(
+    "/recordings",
+    response_model=RecordingPageResponse,
+    responses=RECORDING_ERRORS,
+    summary="Every synthesis this account has kept",
+    description=(
+        "What was said, in whose voice, and when — newest first, "
+        "cursor-paginated exactly as `GET /tts/batch` is.\n\n"
+        "**The audio is a separate request.** `GET /tts/recordings/{id}/audio` "
+        "returns the file; a page of twenty-five clips inlined here would be "
+        "tens of megabytes that almost every caller discards.\n\n"
+        "A synthesis is recorded when it delivered audio and was charged for "
+        "it. Three cases are therefore absent by design: a call upstream "
+        "refused before the first byte, which charged nothing; a retry under a "
+        "spent `Idempotency-Key`, which re-synthesised the same text and is "
+        "already here under the original; and everything synthesised while "
+        "`RECORDINGS_ENABLED` was false.\n\n"
+        "**These rows do not expire.** They hold the exact text that was "
+        "submitted, for as long as the account exists or until "
+        "`DELETE /tts/recordings/{id}`."
+    ),
+)
+async def recordings(
+    user: CurrentUser,
+    session: SessionDep,
+    limit: int | None = LimitQuery,
+    cursor: str | None = CursorQuery,
+) -> RecordingPageResponse:
+    page_size = clamp_limit(limit)
+    rows, has_more = await tts_recording_service.page(
+        session, user_id=user.id, limit=page_size, position=decode_cursor(cursor)
+    )
+    next_cursor = (
+        Cursor(created_at=rows[-1].created_at, row_id=rows[-1].id).encode()
+        if has_more and rows
+        else None
+    )
+    return RecordingPageResponse(
+        recordings=[recording_response(row) for row in rows],
+        page=PageInfo(next_cursor=next_cursor, has_more=has_more, limit=page_size),
+    )
+
+
+@router.get(
+    "/recordings/{recording_id}",
+    response_model=RecordingResponse,
+    responses=RECORDING_ERRORS,
+    summary="One kept synthesis",
+    description=(
+        "Somebody else's recording is a `404` rather than a `403`, for the "
+        "reason a batch job is: a 403 confirms the id exists, which is the one "
+        "thing a stranger walking the id space is trying to learn."
+    ),
+)
+async def recording(
+    user: CurrentUser,
+    session: SessionDep,
+    recording_id: uuid.UUID = RecordingIdPath,
+) -> RecordingResponse:
+    return recording_response(
+        await tts_recording_service.require_own(
+            session, user_id=user.id, recording_id=recording_id
+        )
+    )
+
+
+@router.get(
+    "/recordings/{recording_id}/audio",
+    responses={
+        **RECORDING_ERRORS,
+        200: {
+            "content": {"audio/mpeg": {}, "audio/wav": {}, "audio/opus": {}},
+            "description": "The audio exactly as it was delivered.",
+        },
+    },
+    summary="The audio of a kept synthesis",
+    description=(
+        "The same bytes the original `POST /tts/speech` streamed, byte for "
+        "byte — the file is stored under the sha256 in the recording, so it "
+        "can be verified rather than trusted.\n\n"
+        "Costs nothing and charges nothing: the synthesis was paid for when it "
+        "happened, and playing it back does not reach the speech service at "
+        "all.\n\n"
+        "A `404` here with the recording still listed means the row survived "
+        "and the file did not — a restore that missed `RECORDINGS_DIR`, or a "
+        "disk that was cleared. The row is left in place rather than swept, "
+        "because it is still the record that the synthesis happened."
+    ),
+)
+async def recording_audio(
+    user: CurrentUser,
+    session: SessionDep,
+    recording_id: uuid.UUID = RecordingIdPath,
+) -> FileResponse:
+    row = await tts_recording_service.require_own(
+        session, user_id=user.id, recording_id=recording_id
+    )
+    path = recording_store.path_for(row.storage_key)
+    if path is None or not path.exists():
+        logger.warning(
+            "recording_file_missing id=%s key=%s", row.id, row.storage_key
+        )
+        raise NotFoundError(
+            "The audio for this recording is no longer on disk.",
+            code="recording_audio_missing",
+        )
+    return FileResponse(
+        path,
+        media_type=tts_service.media_type_for(row.audio_format),
+        # Named for the recording rather than for its content address, because
+        # a browser puts this in the user's downloads folder and `a1b2c3….wav`
+        # is not a filename anybody can find again.
+        filename=f"synora-{row.id}.{recording_store.extension_for(row.audio_format)}",
+    )
+
+
+@router.delete(
+    "/recordings/{recording_id}",
+    response_model=MessageResponse,
+    responses=RECORDING_ERRORS,
+    summary="Erase one kept synthesis",
+    description=(
+        "Removes the row and, once no other recording names the same audio, "
+        "the file.\n\n"
+        "**The file is shared when the audio is identical.** It is stored under "
+        "the sha256 of its own bytes, so the same text in the same voice at the "
+        "same settings is one file however many times it was synthesised. "
+        "Deleting yours never empties somebody else's playback.\n\n"
+        "Nothing about the charge changes: `usage_events`, the ledger and "
+        "`GET /usage` are the record of what was billed, and this route does "
+        "not touch them. Deleting a recording erases what was said, not that it "
+        "was paid for."
+    ),
+)
+async def delete_recording(
+    user: CurrentUser,
+    session: SessionDep,
+    recording_id: uuid.UUID = RecordingIdPath,
+) -> MessageResponse:
+    await tts_recording_service.delete(
+        session, user_id=user.id, recording_id=recording_id
+    )
+    return MessageResponse(message="Recording deleted.")

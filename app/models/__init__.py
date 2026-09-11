@@ -35,6 +35,7 @@ from app.models.price_book import MODEL_KEY_ANY, Price, PriceBookVersion
 from app.models.service_api_key import ServiceApiKey
 from app.models.topup import Payment, Topup
 from app.models.tts_job import TtsBatchJob
+from app.models.tts_recording import TtsRecording
 from app.models.usage import UsageEvent, UsageEventItem
 from app.models.usage_rollup import UsageDailyRollup
 from app.models.user import User, normalize_email
@@ -70,6 +71,7 @@ __all__ = [
     "TopupStatus",
     "TtsBatchJob",
     "TtsBatchJobState",
+    "TtsRecording",
     "UsageDailyRollup",
     "UsageEvent",
     "UsageEventItem",

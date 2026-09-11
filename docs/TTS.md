@@ -38,6 +38,7 @@ TOKEN=$(curl -s -X POST "$API/auth/login" \
 | A corpus — chapters, a catalogue, a hundred prompts | `POST /tts/batch` | Held at creation, charged at what was actually synthesised |
 | To know which voices exist | `GET /tts/voices` | Nothing |
 | A cloned voice from a clip | `POST /tts/voices` | Nothing |
+| What you synthesised, and to hear it again | `GET /tts/recordings` | Nothing |
 | What this account has consumed | `GET /usage` | Nothing |
 | The money side of the same events | `GET /wallet/transactions` | Nothing |
 
@@ -684,6 +685,97 @@ than on a clock. Poll your jobs, or run the worker.
 
 ---
 
+## Recordings
+
+Every delivered synthesis is kept: the text, the settings, and the audio.
+
+```bash
+curl "$API/tts/recordings?limit=25" -H "$A"
+```
+
+```json
+{
+  "ok": true,
+  "recordings": [
+    {
+      "id": "7d0e1b84-…",
+      "ai_session_id": "cba9a8e6-…",
+      "text": "Assalomu alaykum, bugun havo juda yaxshi.",
+      "voice_id": null,
+      "quality": "balanced",
+      "audio_format": "wav",
+      "sample_rate": 48000,
+      "style": null,
+      "characters": 41,
+      "audio_bytes": 307244,
+      "audio_ms": 3200,
+      "sha256": "9f2c…",
+      "created_at": "2026-09-11T05:12:44.031Z"
+    }
+  ],
+  "page": { "next_cursor": "…", "has_more": false, "limit": 25 }
+}
+```
+
+Cursor-paginated exactly as `GET /tts/batch` is. `ai_session_id` is the thread
+back to the money — the same id the hold, the release and the debit carry in
+`GET /wallet/transactions`.
+
+**The audio is a second request**, because a page of twenty-five clips inlined
+as base64 is tens of megabytes almost every caller throws away:
+
+```bash
+curl "$API/tts/recordings/$ID/audio" -H "$A" -o out.wav
+# → 200, audio/wav, byte for byte what POST /tts/speech streamed
+```
+
+It costs nothing, charges nothing and never reaches the speech service: the
+synthesis was paid for when it happened. The file is stored under the sha256 in
+the recording, so the bytes can be verified rather than trusted:
+
+```bash
+shasum -a 256 out.wav      # equals the `sha256` field
+```
+
+### What is not kept
+
+| Case | Why |
+| --- | --- |
+| Upstream refused before the first byte | Nothing was delivered and nothing was charged |
+| A retry under a spent `Idempotency-Key` | The same text and voice produce the same bytes, and the original already has the row |
+| Anything at all while `RECORDINGS_ENABLED=false` | The deployment opted out |
+
+### Deleting
+
+```bash
+curl -X DELETE "$API/tts/recordings/$ID" -H "$A"
+# → 200 {"ok":true,"message":"Recording deleted."}
+```
+
+Somebody else's id is a `404`, never a `403`: a 403 confirms the id exists,
+which is the one thing a stranger walking the id space is trying to learn.
+
+**Deleting erases what was said, not that it was paid for.** `usage_events`,
+the ledger and `GET /usage` are untouched — a customer removing a recording is
+not a refund, and an invoice that changed retroactively would be the worse
+surprise.
+
+The file is shared when the audio is identical. It is stored under the digest
+of its own bytes, so the same text in the same voice is one file however many
+accounts asked for it; the delete removes the row and only unlinks the file
+once no row names it any more. Your delete never empties somebody else's
+playback.
+
+### A 404 on the audio with the row still listed
+
+The row survived and the file did not — a restore that missed
+`RECORDINGS_DIR`, or a disk that was cleared. The code is
+`recording_audio_missing`, and the row is deliberately left in place: it is
+still the record that the synthesis happened, and sweeping it would erase the
+only evidence.
+
+---
+
 ## `GET /usage`
 
 Your own consumption, grouped by service and metric, over a window. Summed from
@@ -758,6 +850,8 @@ not.
 | `tts_unreadable` | 502 | Upstream sent a 2xx we could not parse | Retry once, then report it |
 | `tts_busy` | 429 | Upstream is saturated | Honour `Retry-After` |
 | `tts_not_found` | 404 | No such voice, or no such upstream job | Refresh the voice list |
+| `recording_not_found` | 404 | No such recording, or it is not yours | Nothing. Ids are not guessable and a 403 would confirm one |
+| `recording_audio_missing` | 404 | The row is there, the file is not | Report it. A restore missed `RECORDINGS_DIR` |
 | `tts_rejected_input` | 400 | Upstream refused the payload; the message is upstream's own words about your text | Fix the input; do not retry |
 | `tts_text_empty` | 400 | Nothing to synthesise | Fix the input |
 | `tts_text_too_long` | 400 | Over `TTS_MAX_CHARACTERS` | Use `/tts/batch` |
@@ -806,6 +900,8 @@ terminal session for text that was never going to be synthesised.
 | `TTS_BATCH_MAX_CHARACTERS` | `500000` | Per job |
 | `TTS_BATCH_POLL_SECONDS` | `10` | How often a job may be polled upstream, worker or route |
 | `TTS_BATCH_MAX_POLL_SECONDS` | `21600` | Six hours, then the job is settled `expired` and the hold released |
+| `RECORDINGS_ENABLED` | `true` | Keep the text and audio of every delivered synthesis. `false` keeps neither, and the `/tts/recordings` routes answer with an empty list |
+| `RECORDINGS_DIR` | `data/recordings` | Where the audio goes, content-addressed. Roughly 96 KB per second of 48 kHz wav |
 | `RABBITMQ_URL` | unset | Empty ⇒ batch runs inline. See [docs/QUEUEING.md](QUEUEING.md) |
 
 Prices are not here. They live in the database, versioned, and are published

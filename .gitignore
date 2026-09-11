@@ -8,6 +8,9 @@ env/
 *.db
 *.sqlite3
 
+# Kept syntheses: customer audio, content-addressed under RECORDINGS_DIR.
+data/recordings/
+
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

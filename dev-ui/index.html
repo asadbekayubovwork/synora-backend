@@ -143,6 +143,7 @@
       <button data-tab="speech">Nutq</button>
       <button data-tab="batch">Batch</button>
       <button data-tab="voices">Ovozlar</button>
+      <button data-tab="recordings">Yozuvlar</button>
       <button data-tab="usage">Usage</button>
       <button data-tab="wallet">Wallet</button>
       <button data-tab="admin">Admin</button>
@@ -298,6 +299,25 @@ bob2 | Ikkinchi bob.</textarea>
             kaliti bor, shuning uchun klon hammaga ko'rinadi va <code>DELETE</code> uni
             hamma uchun o'chiradi.
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---------------------------------------------------- recordings -->
+    <div class="tab" id="tab-recordings">
+      <div class="body">
+        <div class="row" style="margin-top:0">
+          <button id="btnRecordings" class="primary">yozuvlarni yuklash</button>
+          <button id="btnRecordingsMore" disabled>ko'proq</button>
+        </div>
+        <div id="recordingList"></div>
+        <div class="hint">
+          Har bir yetkazilgan sintez saqlanadi: matn va parametrlar bazada,
+          audio esa <code>RECORDINGS_DIR</code> ichida o'z sha256'i bilan
+          nomlangan faylda. Upstream birinchi baytdan oldin rad etgan chaqiruv,
+          sarflangan idempotency kaliti bilan qaytarilgan takror, va
+          <code>RECORDINGS_ENABLED=false</code> paytidagi hamma narsa —
+          ataylab saqlanmaydi.
         </div>
       </div>
     </div>
@@ -706,6 +726,8 @@ bob2 | Ikkinchi bob.</textarea>
       (h("X-Synora-Characters") && !$("voice").value
         ? `<div>headerdagi belgi soni matn uzunligiga teng bo'lishi kerak: ${$("text").value.length}</div>` : "");
     if (!okSpent || !okReserved) toast("Pul harakati kutilganday emas — logni qarang", true);
+    // Yozuvlar yorlig'i ochiq bo'lsa, yangi sintez darhol ko'rinsin.
+    if ($("tab-recordings").classList.contains("active")) loadRecordings().catch(() => {});
   });
 
   // ------------------------------------------------------------ batch
@@ -834,6 +856,80 @@ bob2 | Ikkinchi bob.</textarea>
     toast("Klon qo'shildi: " + data.voice_id);
     $("btnVoices").click();
   });
+
+  // ------------------------------------------------------------ recordings
+  async function loadRecordings(cursor) {
+    const data = await api("GET", "/tts/recordings", { query: { limit: 10, cursor } });
+    const rows = data.recordings.map((r) => `
+      <div class="card" data-rec="${esc(r.id)}">
+        <div class="kv">
+          <span>matn</span><span>${esc(r.text.length > 160 ? r.text.slice(0, 160) + "…" : r.text)}</span>
+          <span>ovoz</span><span>${esc(r.voice_id || "(standart)")} · ${esc(r.quality)} · ${esc(r.audio_format)} @ ${r.sample_rate}</span>
+          <span>o'lcham</span><span>${r.characters} belgi · ${r.audio_bytes} bayt${r.audio_ms ? " · " + r.audio_ms + " ms" : ""}</span>
+          <span>sha256</span><span>${esc(r.sha256.slice(0, 16))}…</span>
+          <span>sessiya</span><span>${short(r.ai_session_id)}…</span>
+          <span>vaqt</span><span>${esc(r.created_at.replace("T", " ").slice(0, 19))}</span>
+        </div>
+        <div class="row">
+          <button data-play="${esc(r.id)}">eshitish</button>
+          <button data-del-rec="${esc(r.id)}" class="danger">o'chirish</button>
+          <span class="hint" style="margin:0" data-check="${esc(r.id)}"></span>
+        </div>
+        <audio controls style="display:none"></audio>
+      </div>`).join("");
+    if (cursor) $("recordingList").insertAdjacentHTML("beforeend", rows);
+    else $("recordingList").innerHTML = rows || `<div class="hint">Hali yozuv yo'q.</div>`;
+    store.recCursor = data.page.next_cursor || "";
+    $("btnRecordingsMore").disabled = !data.page.has_more;
+    wireRecordings();
+  }
+
+  function wireRecordings() {
+    $("recordingList").querySelectorAll("button[data-play]").forEach((b) => {
+      if (b.dataset.wired) return;
+      b.dataset.wired = "1";
+      b.addEventListener("click", async () => {
+        const id = b.dataset.play;
+        const card = b.closest("[data-rec]");
+        const url = store.base.replace(/\/$/, "") + "/tts/recordings/" + id + "/audio";
+        const started = performance.now();
+        const res = await fetch(url, { headers: { Authorization: "Bearer " + store.access } });
+        const ms = Math.round(performance.now() - started);
+        if (!res.ok) {
+          const data = await res.json().catch(() => null);
+          logEntry("GET", "/tts/recordings/{id}/audio", res.status, ms, undefined, data);
+          toast(describe(res.status, data), true);
+          return;
+        }
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        logEntry("GET", "/tts/recordings/{id}/audio", 200, ms, undefined,
+          `${bytes.length} bayt, ${res.headers.get("content-type")}`);
+        // Saqlangan baytlar chindan ham yozuvdagi digestga mos keladimi —
+        // fayl nomi o'z mazmuni haqidagi da'vo, va uni tekshirsa bo'ladi.
+        const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
+          .map((x) => x.toString(16).padStart(2, "0")).join("");
+        const claimed = card.querySelector(".kv span:nth-child(8)").textContent.replace("…", "");
+        const ok = digest.startsWith(claimed);
+        card.querySelector(`[data-check="${id}"]`).innerHTML =
+          `sha256 <span class="pill ${ok ? "ok" : "bad"}">${ok ? "mos" : "mos emas"}</span>`;
+        const player = card.querySelector("audio");
+        player.src = URL.createObjectURL(new Blob([bytes], { type: res.headers.get("content-type") }));
+        player.style.display = "";
+        player.play().catch(() => {});
+      });
+    });
+    $("recordingList").querySelectorAll("button[data-del-rec]").forEach((b) => {
+      if (b.dataset.wired) return;
+      b.dataset.wired = "1";
+      b.addEventListener("click", async () => {
+        await api("DELETE", "/tts/recordings/" + b.dataset.delRec).catch(() => {});
+        loadRecordings().catch(() => {});
+      });
+    });
+  }
+
+  on("btnRecordings", () => loadRecordings());
+  on("btnRecordingsMore", () => loadRecordings(store.recCursor));
 
   // ------------------------------------------------------------ usage
   on("btnUsage", async () => {
