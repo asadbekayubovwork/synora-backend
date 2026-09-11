@@ -133,8 +133,26 @@ class BadGatewayError(AppError):
 
 
 class ServiceUnavailableError(AppError):
-    def __init__(self, message: str, code: str = "service_unavailable") -> None:
-        super().__init__(message, status.HTTP_503_SERVICE_UNAVAILABLE, code)
+    def __init__(
+        self,
+        message: str,
+        code: str = "service_unavailable",
+        retry_after: int | None = None,
+    ) -> None:
+        # `retry_after` because one 503 here is genuinely temporary and the
+        # others are not. `stt_not_ready` means a checkpoint is loading and the
+        # call succeeds on its own in a few seconds; `tts_not_configured` and
+        # `stt_key_rejected` need a human, and telling a client to retry those
+        # is telling it to hammer a wall. Only the first one passes a number.
+        headers = {"Retry-After": str(retry_after)} if retry_after is not None else None
+        super().__init__(
+            message,
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            code,
+            headers=headers,
+            extra={"retryAfter": retry_after},
+        )
+        self.retry_after = retry_after
 
 
 def _body(message: str, code: str, **extra: Any) -> dict[str, Any]:

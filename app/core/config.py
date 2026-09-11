@@ -119,6 +119,34 @@ class Settings(BaseSettings):
     tts_batch_poll_seconds: int = 10
     tts_batch_max_poll_seconds: int = 21_600
 
+    # --- Speech to text ----------------------------------------------------
+    # A second gateway, same shape as the TTS one and a different upstream:
+    # multipart rather than JSON, `X-Token` rather than `X-API-Key`. Empty
+    # means every `/stt` route answers 503, exactly as for TTS.
+    stt_base_url: str = ""
+    stt_api_key: str = ""
+    # Which price book row transcription bills against. The seeded price is on
+    # the wildcard model key, so this only matters once someone prices two
+    # checkpoints differently.
+    stt_model_key: str = "synora-stt"
+    stt_connect_timeout_seconds: float = 10.0
+    # Whisper is near real time on a warm card — the service reports an `rtf`
+    # around 0.25 — but a cold start loads the checkpoint first, and the upload
+    # itself is on this clock too.
+    stt_read_timeout_seconds: float = 300.0
+    # Refused before the wallet is touched, both of them. 25 MB matches what
+    # every other transcription API accepts, and ten minutes is the point past
+    # which a caller wants a job rather than a request that hangs.
+    stt_max_audio_bytes: int = 25 * 1024 * 1024
+    stt_max_audio_seconds: int = 600
+    # How long a byte of compressed audio is assumed to be, for the *hold*
+    # only. Deliberately generous — 64 kbps, where speech is usually 128 — so
+    # the hold covers the charge rather than the other way round: an
+    # under-estimate would be clamped at settlement and bill less than the
+    # work, which is the one error nobody notices. WAV and PCM never use this;
+    # their duration is read out of the header exactly.
+    stt_assumed_bytes_per_second: int = 8_000
+
     # --- Recordings --------------------------------------------------------
     # Keep every delivered synthesis: its text and parameters in
     # `tts_recordings`, its audio in a content-addressed file under the
@@ -236,6 +264,13 @@ class Settings(BaseSettings):
         return bool(self.tts_base_url.strip() and self.tts_api_key.strip())
 
     @property
+    def has_stt(self) -> bool:
+        # Both halves or neither, for the reason `has_tts` gives: a base url
+        # with no token is a route that exists and answers 401 from upstream,
+        # which reads to the caller as their own fault.
+        return bool(self.stt_base_url.strip() and self.stt_api_key.strip())
+
+    @property
     def has_broker(self) -> bool:
         return bool(self.rabbitmq_url.strip())
 
@@ -322,6 +357,12 @@ class Settings(BaseSettings):
             problems.append("TTS_BASE_URL and TTS_API_KEY must be set together")
         if self.tts_max_characters < 1:
             problems.append("TTS_MAX_CHARACTERS must be positive")
+        if bool(self.stt_base_url.strip()) != bool(self.stt_api_key.strip()):
+            problems.append("STT_BASE_URL and STT_API_KEY must be set together")
+        if self.stt_max_audio_bytes < 1 or self.stt_max_audio_seconds < 1:
+            problems.append("STT_MAX_AUDIO_* must be positive")
+        if self.stt_assumed_bytes_per_second < 1:
+            problems.append("STT_ASSUMED_BYTES_PER_SECOND must be positive")
 
         # SQLite serialises writers and silently ignores `FOR UPDATE`. It is
         # fine for development and for the tests; it is not a money database.

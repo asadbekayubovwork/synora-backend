@@ -82,6 +82,7 @@ All under `/api/v1`.
 | `GET`  | `/tts/recordings/{id}` | One of them |
 | `GET`  | `/tts/recordings/{id}/audio` | Play it back. Costs nothing |
 | `DELETE` | `/tts/recordings/{id}` | Erase one |
+| `POST` | `/stt/transcribe` | Transcribe an upload. Metered by duration |
 | `GET`  | `/usage` | Your own consumption, by service and metric |
 | `GET`  | `/admin/wallets/{user_id}` | Any user's balance (superuser) |
 | `POST` | `/admin/wallets/{user_id}/credits` | Grant credit by hand (superuser) |
@@ -461,6 +462,7 @@ topology and the worker's runbook.
 
 | | |
 | --- | --- |
+| [docs/STT.md](docs/STT.md) | Transcription: the one route, why the hold is an estimate and the charge is not, the error table |
 | [docs/TTS.md](docs/TTS.md) | The integration contract: every route with a curl example, what is billed and when, the `402` shape, the error-code table |
 | [Trying it locally](docs/TTS.md#trying-it-locally) | Zero to a synthesis you paid for: a throwaway database, a funded account, and what each response should say |
 | [docs/QUEUEING.md](docs/QUEUEING.md) | Where RabbitMQ is used, where it is refused, and how to run the worker |
@@ -588,6 +590,40 @@ synora: Metrics: not served (set METRICS_TOKEN; /metrics answers 404 without one
 Details in [grafana/README.md](grafana/README.md) and in the module docstring
 of `app/core/metrics.py`.
 
+## Speech to text
+
+The second gateway, same trade as the first: our token never leaves this
+process, the caller uses their own JWT, and every second of audio is metered
+here rather than read back from a supplier's invoice.
+
+```bash
+curl -X POST "$API/stt/transcribe" -H "$A" \
+  -F 'file=@clip.wav' -F 'language=uz'
+# → {"text":"Assalomu alaykum…","audio_ms":1280,"price":"1.200000", …}
+#   x-synora-price: 1.200000   x-synora-session-id: db0e0ef5-…
+```
+
+Priced on `stt_audio_ms` and nothing else — 1.2 credits a minute in the seeded
+price book, rounded up to the started minute.
+
+**The hold is an estimate and the charge is not**, which is the one structural
+difference from the speech side. There the billable quantity is the text in the
+request, so the price is known before any work happens. Here it is the duration
+of a file nothing on our side has decoded, so credit is held against an
+estimate — exact for `wav`, read out of the RIFF header, and deliberately
+generous for compressed formats — and the bill is settled against the duration
+the service reports. Over-holding is visible and comes straight back;
+under-holding would be clamped at settlement and bill less than the work, which
+is the error nobody notices. `app/services/ai/stt_service.py` argues it at
+length.
+
+Everything else is the shape TTS already established: a refusal before the
+first byte charges nothing and releases the hold, an upstream that over-reports
+is clamped and flagged `disputed`, and a spent `Idempotency-Key` is a `409`
+rather than a second charge — there is no transcript stored to hand back.
+
+The whole contract, with the error table: [docs/STT.md](docs/STT.md).
+
 ## The Nuxt frontend
 
 `Synora-frontend` is already wired to this API. The browser calls it directly —
@@ -684,6 +720,7 @@ Everything lives in `.env`; see [.env.example](.env.example) for the full list.
 | `BILLING_HOLD_SECONDS` | `120` | How much of a realtime session to reserve up front |
 | `BILLING_ROLLUP_TIMEZONE` | `Asia/Tashkent` | Local day boundary for usage reports |
 | `TTS_BASE_URL` / `TTS_API_KEY` | unset | Unset ⇒ every `/tts` route answers `503`. One without the other is refused at boot. Full list in [docs/TTS.md](docs/TTS.md#configuration) |
+| `STT_BASE_URL` / `STT_API_KEY` | unset | Unset ⇒ `/stt/transcribe` answers `503`. Sent as `X-Token`, not `X-API-Key`. Full list in [docs/STT.md](docs/STT.md#configuration) |
 | `RECORDINGS_ENABLED` / `RECORDINGS_DIR` | `true` / `data/recordings` | Keep the text and the audio of every delivered synthesis. `false` keeps neither |
 | `METRICS_ENABLED` / `METRICS_TOKEN` | `true` / unset | `GET /metrics`. Outside development it answers `404` until a token is set — nginx proxies `location /`, so the endpoint is public the moment it exists |
 | `RABBITMQ_URL` | unset | Unset ⇒ batch jobs are submitted inline and polled when read. See [docs/QUEUEING.md](docs/QUEUEING.md) |
@@ -795,6 +832,8 @@ app/
 │   ├── ai/
 │   │   ├── recording_store.py   Audio files, content-addressed. No rows
 │   │   ├── tts_recording_service.py  Rows for delivered audio, and ownership
+│   │   ├── stt_client.py        The transcription box. X-Token, multipart
+│   │   ├── stt_service.py       Estimate, hold, transcribe, settle
 │   │   ├── tts_client.py        The speech box, and nothing else. No money
 │   │   ├── tts_service.py       One metered stream: hold, relay, settle
 │   │   └── tts_batch_service.py A job, its hold and its settlement
@@ -812,6 +851,7 @@ app/
 │       ├── oauth.py     Provider routes
 │       ├── wallet.py    Balance and statement
 │       ├── tts.py       Speech: the metered stream, voices, batch jobs
+│       ├── stt.py       Transcription: one metered upload
 │       ├── usage.py     What this account consumed, from our own rows
 │       └── admin.py     Superuser-only money routes
 └── workers/             Processes that are not the API. All of them optional

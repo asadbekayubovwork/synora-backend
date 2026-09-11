@@ -28,6 +28,7 @@ PATHS = [
     "/api/v1/tts/recordings",
     "/api/v1/tts/recordings/{recording_id}",
     "/api/v1/tts/recordings/{recording_id}/audio",
+    "/api/v1/stt/transcribe",
     "/api/v1/usage",
     "/api/v1/admin/wallets/{user_id}",
     "/api/v1/admin/wallets/{user_id}/credits",

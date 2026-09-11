@@ -144,6 +144,7 @@
       <button data-tab="batch">Batch</button>
       <button data-tab="voices">Ovozlar</button>
       <button data-tab="recordings">Yozuvlar</button>
+      <button data-tab="stt">Matnga</button>
       <button data-tab="usage">Usage</button>
       <button data-tab="wallet">Wallet</button>
       <button data-tab="admin">Admin</button>
@@ -318,6 +319,38 @@ bob2 | Ikkinchi bob.</textarea>
           sarflangan idempotency kaliti bilan qaytarilgan takror, va
           <code>RECORDINGS_ENABLED=false</code> paytidagi hamma narsa —
           ataylab saqlanmaydi.
+        </div>
+      </div>
+    </div>
+
+    <!-- ----------------------------------------------------------- stt -->
+    <div class="tab" id="tab-stt">
+      <div class="body">
+        <label>Audio fayl</label>
+        <input type="file" id="sttFile" accept="audio/*" />
+        <div class="grid2">
+          <div><label>Til</label><select id="sttLang">
+            <option selected>uz</option><option>ru</option><option>en</option>
+          </select></div>
+          <div><label>Idempotency-Key (ixtiyoriy)</label><input id="sttIdem" placeholder="bo'sh = har chaqiruv alohida" /></div>
+        </div>
+        <div class="row">
+          <button id="btnTranscribe" class="primary">matnga aylantirish</button>
+          <button id="btnSttFromLast">oxirgi sintezni o'qish</button>
+        </div>
+
+        <div class="card" id="sttCard" style="display:none">
+          <h3>Transkript</h3>
+          <div id="sttText" style="font-size:14px;line-height:1.6;margin-bottom:10px"></div>
+          <div class="kv" id="sttKv"></div>
+        </div>
+
+        <div class="hint">
+          Hold — <b>baho</b>, hisob esa xizmat o'lchagan davomiylik. <code>wav</code>
+          uchun baho RIFF sarlavhasidan aniq o'qiladi; siqilgan formatlar uchun
+          ataylab yuqoriroq olinadi, shuning uchun <code>reserved</code> bir zum
+          narxdan katta ko'rinib, so'ng qaytadi. Xizmat rad etsa — hech nima
+          olinmaydi.
         </div>
       </div>
     </div>
@@ -712,6 +745,8 @@ bob2 | Ikkinchi bob.</textarea>
       `<span>baytlar</span><span>${bytes} · ${count} bo'lak</span>` +
       `<span>vaqt</span><span>1-bayt ${ttfb} ms · jami ${total} ms</span>`;
     $("player").src = URL.createObjectURL(blob);
+    // STT yorlig'idagi "oxirgi sintezni o'qish" shuni ishlatadi.
+    lastAudioBlob = blob;
 
     const after = await walletNow();
     const spent = before.available_micros - after.available_micros;
@@ -930,6 +965,72 @@ bob2 | Ikkinchi bob.</textarea>
 
   on("btnRecordings", () => loadRecordings());
   on("btnRecordingsMore", () => loadRecordings(store.recCursor));
+
+  // ------------------------------------------------------------ stt
+  // Oxirgi sintez qilingan audio — TTS chiqishini to'g'ridan-to'g'ri STT ga
+  // berib ko'rish uchun. Ikki shlyuzni bir aylanishda sinaydi.
+  let lastAudioBlob = null;
+
+  async function transcribe(blob, filename) {
+    if (!store.access) { toast("Avval kiring", true); return; }
+    const before = await walletNow();
+    const form = new FormData();
+    form.append("file", blob, filename);
+    form.append("language", $("sttLang").value);
+    const headers = { Authorization: "Bearer " + store.access };
+    if ($("sttIdem").value.trim()) headers["Idempotency-Key"] = $("sttIdem").value.trim();
+
+    const started = performance.now();
+    let res;
+    try {
+      res = await fetch(store.base.replace(/\/$/, "") + "/stt/transcribe",
+        { method: "POST", headers, body: form });
+    } catch (e) {
+      logEntry("POST", "/stt/transcribe", 0, Math.round(performance.now() - started), undefined, String(e));
+      toast("Tarmoq xatosi: " + e.message, true);
+      return;
+    }
+    const ms = Math.round(performance.now() - started);
+    const text = await res.text();
+    let data; try { data = JSON.parse(text); } catch { data = text; }
+    logEntry("POST", "/stt/transcribe", res.status, ms,
+      { file: filename, bytes: blob.size, language: $("sttLang").value }, data,
+      [...res.headers].filter(([k]) => k.startsWith("x-synora")).map(([k, v]) => k + ": " + v).join("\n"));
+
+    if (!res.ok) {
+      toast(describe(res.status, data), true);
+      await walletNow();
+      return;
+    }
+
+    const after = await walletNow();
+    const spent = before.available_micros - after.available_micros;
+    const ok = spent === data.price_micros;
+    $("sttCard").style.display = "";
+    $("sttText").textContent = data.text || "(nutq topilmadi)";
+    $("sttKv").innerHTML =
+      `<span>til</span><span>${esc(data.language)}</span>` +
+      `<span>davomiylik</span><span>${data.audio_ms} ms</span>` +
+      `<span>narx</span><span>${esc(data.price)}</span>` +
+      `<span>model vaqti</span><span>${data.infer_seconds == null ? "—" : data.infer_seconds.toFixed(2) + " s"}</span>` +
+      `<span>sessiya</span><span>${short(data.ai_session_id)}…</span>` +
+      `<span>yuborildi</span><span>${blob.size} bayt · ${ms} ms</span>` +
+      `<span>hisob</span><span>yechildi ${credits(spent)} ` +
+        `<span class="pill ${ok ? "ok" : "bad"}">${ok ? "mos" : "mos emas"}</span> · ` +
+        `reserved ${after.reserved} <span class="pill ${after.reserved_micros ? "bad" : "ok"}">` +
+        `${after.reserved_micros ? "qaytmadi" : "qaytdi"}</span></span>`;
+  }
+
+  on("btnTranscribe", async () => {
+    const file = $("sttFile").files[0];
+    if (!file) { toast("Fayl tanlanmadi", true); return; }
+    await transcribe(file, file.name);
+  });
+
+  on("btnSttFromLast", async () => {
+    if (!lastAudioBlob) { toast("Avval Nutq yorlig'ida bir narsa sintez qiling", true); return; }
+    await transcribe(lastAudioBlob, "synthesised.wav");
+  });
 
   // ------------------------------------------------------------ usage
   on("btnUsage", async () => {

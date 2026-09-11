@@ -167,6 +167,33 @@ upstream_errors = Counter(
 )
 
 
+# --- the transcription box ---------------------------------------------------
+#
+# Its own metrics rather than another `operation` label on the speech box's,
+# because the two are different upstreams with different failure vocabularies
+# and one dashboard panel showing both would be answering two questions at
+# once. The money side needs no such split: `service` already tells `tts` from
+# `stt` on every counter below.
+
+stt_upstream_seconds = Histogram(
+    "synora_stt_upstream_seconds",
+    "Time the transcription service took to answer, upload included.",
+    buckets=(0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0),
+    registry=REGISTRY,
+)
+stt_upstream_errors = Counter(
+    "synora_stt_upstream_errors_total",
+    "Transcription failures by the code we mapped them to, not by status.",
+    ("code",),
+    registry=REGISTRY,
+)
+stt_audio_seconds = Counter(
+    "synora_stt_audio_seconds_total",
+    "Seconds of audio transcribed and charged for, as upstream counted them.",
+    registry=REGISTRY,
+)
+
+
 # --- money ------------------------------------------------------------------
 
 sessions_settled = Counter(
@@ -340,6 +367,19 @@ def observe_upstream(*, operation: str, seconds: float) -> None:
 
 def record_upstream_error(*, operation: str, code: str) -> None:
     upstream_errors.labels(operation=operation, code=code).inc()
+
+
+def observe_stt_upstream(*, seconds: float) -> None:
+    stt_upstream_seconds.observe(seconds)
+
+
+def record_stt_upstream_error(*, code: str) -> None:
+    stt_upstream_errors.labels(code=code).inc()
+
+
+def record_transcription(*, audio_seconds: float) -> None:
+    """One charged transcription, in the unit the price book prices."""
+    stt_audio_seconds.inc(audio_seconds)
 
 
 def record_settlement(

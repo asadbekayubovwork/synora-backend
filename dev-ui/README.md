@@ -53,6 +53,7 @@ o'qiy oladi.
 | Nutq | `POST /tts/estimate`, `POST /tts/speech` (audio pleyer bilan) |
 | Batch | `POST/GET /tts/batch`, `GET /tts/batch/{id}`, `/results`, `DELETE` |
 | Ovozlar | `GET/POST /tts/voices`, `DELETE /tts/voices/{id}` |
+| Matnga | `POST /stt/transcribe` — fayl yuklash yoki oxirgi sintezni qaytarib o'qish |
 | Usage | `GET /usage` |
 | Wallet | `GET /wallet`, `GET /wallet/transactions` (kursor bilan) |
 | Admin | `credits`, `freeze`, `unfreeze`, `GET /admin/wallets/{id}`, `reconcile` |
@@ -86,6 +87,15 @@ proporsional WAV toni chiqaradi (nutq emas — maqsad pulning harakatini ko'rish
 
 **Format `wav` bo'lib turaversin.** Soxta box faqat wav/pcm chiqaradi; `mp3`
 so'ralsa baytlar baribir wav bo'ladi va pleyer ochmaydi.
+
+## Ikki shlyuzni bir aylanishda sinash
+
+**Matnga** yorlig'idagi "oxirgi sintezni o'qish" tugmasi **Nutq** yorlig'ida
+hozirgina yaratilgan audioni STT ga yuboradi: matn → audio → matn. Ikkala
+shlyuz, ikkala hisob-kitob va ikkala `reserved` bir bosishda ko'rinadi.
+
+STT sozlanmagan bo'lsa (`STT_BASE_URL` yo'q) route `503 stt_not_configured`
+qaytaradi — TTS bilan bir xil qoida.
 
 ## Tokenlar haqida
 

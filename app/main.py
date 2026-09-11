@@ -50,7 +50,7 @@ from app.core.exceptions import (
 )
 from app.core.metrics import MetricsMiddleware, refresh_db_gauges, render
 from app.db.session import close_db, init_db
-from app.services.ai import tts_client, tts_service
+from app.services.ai import stt_client, stt_service, tts_client, tts_service
 from app.services.oauth import configured_providers
 
 logging.basicConfig(
@@ -200,6 +200,10 @@ async def lifespan(_: FastAPI):
         settings.tts_base_url if settings.has_tts else "not configured (speech routes answer 503)",
     )
     logger.info(
+        "STT gateway: %s",
+        settings.stt_base_url if settings.has_stt else "not configured (transcription answers 503)",
+    )
+    logger.info(
         "Batch queue: %s",
         "RabbitMQ" if settings.has_broker else "not configured (batch jobs submit inline)",
     )
@@ -240,6 +244,7 @@ async def lifespan(_: FastAPI):
     # `tts_settle_failed`, and leaves its hold to
     # `reconcile_service.reap_expired_sessions`. Late, rather than lost.
     await tts_client.aclose_client()
+    await stt_client.aclose_client()
     await close_broker()
     await close_db()
 
@@ -270,7 +275,13 @@ app.add_middleware(
     # the session id on a `/tts/speech` response are simply `undefined` — no
     # exception, nothing in the console, and the header plainly visible in the
     # network tab, which is as silent as a failure gets.
-    expose_headers=list(tts_service.EXPOSED_HEADERS),
+    # Both gateways' billing headers. `X-Synora-Session-Id`, `-Price` and
+    # `-Price-Micros` are the same names on both, so the list is deduplicated
+    # rather than concatenated — a repeated header name in this list is not
+    # wrong, it is just noise in a response nobody reads twice.
+    expose_headers=sorted(
+        set(tts_service.EXPOSED_HEADERS) | set(stt_service.EXPOSED_HEADERS)
+    ),
 )
 
 # Outermost of the two, so the time it records includes CORS and every
