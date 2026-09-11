@@ -30,7 +30,10 @@ is run without `-x`:
 
 - **`.env`** — the production `JWT_SECRET`. Overwriting it would sign every user
   out at once.
-- **`data/synora.db`** — every account.
+- **`data/synora.db`** — every account, until the database moves to Postgres;
+  see [Moving the database to Postgres](#moving-the-database-to-postgres).
+  `data/recordings/` outlives that move — it is the audio of every kept
+  synthesis.
 
 ## Layout on the server
 
@@ -39,7 +42,8 @@ is run without `-x`:
 ├── .env                      synora:synora 0600 — never in git
 ├── .venv/                    the interpreter systemd runs
 ├── app/                      the code
-└── data/synora.db            synora:synora 0750 — the only writable path
+├── data/synora.db            synora:synora 0750 — until the Postgres move
+└── data/recordings/          synora:synora — audio of every kept synthesis
 ```
 
 The service runs as `synora` with `ProtectSystem=strict`, so the process cannot
@@ -93,10 +97,78 @@ release, so a bad rollback target rolls itself forward again:
 ssh deploy@169.58.183.151 'DEPLOY_REF=<sha> /usr/local/sbin/synora-api-deploy'
 ```
 
+## Moving the database to Postgres
+
+The production `.env` still points `DATABASE_URL` at SQLite, and
+`assert_production_ready()` refuses to start on it — so every release since
+`63e1c13` has failed its health check and rolled back. The refusal is correct:
+SQLite serialises writers and silently ignores `FOR UPDATE`, so the row locking
+the wallet depends on is a no-op there, and "twenty callers race for eight
+credits" resolves by luck. It is fine for development and it is not a money
+database.
+
+Run with the API stopped. `data/synora.db` is not touched by any of this; keep
+it until a day's charges have been read back from the new database.
+
+```bash
+# --- 1. a database and a role, as postgres -------------------------------
+sudo -u postgres createuser --pwprompt synora
+sudo -u postgres createdb --owner synora synora
+
+# --- 2. stop the API. Nothing may write to either side during the copy ----
+sudo systemctl stop synora-api
+
+# --- 3. point .env at Postgres, and fix the other refusal while you are in it
+sudo -u synora vim /opt/synora-backend/.env
+#   DATABASE_URL=postgresql+asyncpg://synora:<password>@localhost/synora
+#   INTERNAL_KEY_SECRET=<openssl rand -hex 32>   # must differ from JWT_SECRET
+#   METRICS_TOKEN=<openssl rand -hex 32>         # optional; /metrics is 404 without it
+
+# --- 4. build the schema on the target, at the same revision --------------
+cd /opt/synora-backend
+sudo -u synora .venv/bin/alembic upgrade head
+
+# --- 5. copy, and prove it ------------------------------------------------
+sudo -u synora .venv/bin/python devtools/migrate_to_postgres.py \
+    --source sqlite+aiosqlite:///data/synora.db \
+    --target "postgresql+asyncpg://synora:<password>@localhost/synora"
+
+# --- 6. start, and check it is the migrated data ---------------------------
+sudo systemctl start synora-api
+curl -s 127.0.0.1:8010/health
+```
+
+Step 5 prints a row count per table from both sides and then recomputes every
+wallet from its own ledger entries — the same `verify_all` reconciliation the
+admin route runs. A mismatch in either exits non-zero and says so. **Do not
+start the API on a target that failed the audit**; the recovery is to drop the
+database and start again from step 1, which costs nothing while nothing has
+been served from it.
+
+It refuses a target that already has rows, and that refusal is load-bearing:
+the natural response to a copy that died halfway is to run it again, and
+`ledger_entries` carries an append-only trigger, so the duplicates could not be
+deleted afterwards. Drop and recreate instead.
+
+**`alembic_version` is not copied.** The target's revision comes from step 4,
+which is also what makes the one-time `alembic stamp` below unnecessary on the
+new database: it is built by migrations rather than inherited from whatever
+state the old one was in.
+
+**The pre-existing SQLite database may still need stamping first**, because
+step 4 runs against Postgres but a later `alembic upgrade head` on a rollback
+would run against whatever `.env` names. Check `alembic current` before
+assuming — see the note under Known gaps.
+
+Afterwards, `pg_dump` replaces the file copy that `bootstrap.sh` did, and
+`data/` stops being the thing worth backing up — it holds recordings now
+(`RECORDINGS_DIR`), which are worth keeping but are not money.
+
 ## Known gaps
 
 - **The database has no backup.** `bootstrap.sh` takes one copy at setup time;
-  nothing copies `data/synora.db` anywhere after that.
+  nothing copies `data/synora.db` anywhere after that. On Postgres this becomes
+  a `pg_dump` on a timer, and it is the same gap until somebody writes it.
 - **A pre-existing database has to be stamped once, by hand.** The release now
   runs `alembic upgrade head` before the restart, so schema changes ship with
   the code that needs them. That only works on a database Alembic knows the

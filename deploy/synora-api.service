@@ -10,9 +10,16 @@ User=synora
 Group=synora
 WorkingDirectory=/opt/synora-backend
 
-# One worker on purpose: the database is SQLite, and concurrent writers from a
-# second process would hit "database is locked". Raise this only alongside a
-# move to Postgres.
+# One worker on purpose, and on Postgres the reason changes rather than goes
+# away. SQLite was the first one: concurrent writers from a second process hit
+# "database is locked". What is left after the move is `app/core/metrics.py` —
+# the Prometheus registry is per-process, so a second worker means Prometheus
+# scrapes whichever one the proxy hands it and every counter reports a fraction
+# of the traffic. `settings.serves_metrics` switches /metrics off rather than
+# publish that, so raising this costs the dashboard until somebody wires up
+# prometheus_client's multiprocess mode. Declare the same number in
+# `WORKER_COUNT` either way: it is what `assert_production_ready` checks
+# against, and it cannot read this file.
 ExecStart=/opt/synora-backend/.venv/bin/uvicorn app.main:app \
     --host 127.0.0.1 \
     --port 8010 \
@@ -36,7 +43,9 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
 LockPersonality=true
-# ProtectSystem=strict makes everything read-only; the database needs an exception.
+# ProtectSystem=strict makes everything read-only. `data/` is the one exception:
+# the SQLite database until the Postgres move, and `RECORDINGS_DIR` for good --
+# every kept synthesis writes an audio file there.
 ReadWritePaths=/opt/synora-backend/data
 
 [Install]

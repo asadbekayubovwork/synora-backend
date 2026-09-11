@@ -835,7 +835,8 @@ stays in its own lane:
 
 | | |
 | --- | --- |
-| Code | `/opt/synora-backend` (venv at `.venv`, database in `data/`) |
+| Code | `/opt/synora-backend` (venv at `.venv`, recordings in `data/`) |
+| Database | Postgres on the same box. Moving there from SQLite: [deploy/README.md](deploy/README.md#moving-the-database-to-postgres) |
 | Service | `synora-api.service`, running as the `synora` system user |
 | Port | `127.0.0.1:8010` — **8000 belongs to the online-talim container** |
 | nginx | `/etc/nginx/sites-available/back.synora-ai.uz.conf` |
