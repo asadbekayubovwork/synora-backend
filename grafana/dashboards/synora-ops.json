@@ -1931,6 +1931,231 @@
           "sort": "desc"
         }
       }
+    },
+    {
+      "type": "timeseries",
+      "title": "Live sessions in flight",
+      "id": 32,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "Each one holds a GPU slot upstream for its whole duration \u2014 the service's own documentation says a live session occupies the card. A number that never returns to zero is a leaked session, which is also a leaked hold.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 71
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "synora_stt_streams_inflight",
+          "legendFormat": "open sockets",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Live sessions per hour, by how they ended",
+      "id": 33,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "`stop_requested` is a client saying goodbye. `heartbeat_timeout` is a tab somebody abandoned, `grace_exhausted` is the cap, and a rise in `client_disconnected` is a network worth looking at.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 71
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (end_reason) (increase(synora_stt_stream_sessions_total[1h]))",
+          "legendFormat": "{{end_reason}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 18,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Speech against connection time",
+      "id": 34,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "The gap between the two lines is the silence VAD trimmed \u2014 billed through the connection fee rather than as audio. Sockets far above audio means people are holding lines open without speaking.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 71
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "rate(synora_stt_audio_seconds_total[5m]) * 60",
+          "legendFormat": "audio seconds/min",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "rate(synora_stt_stream_seconds_total[5m]) * 60",
+          "legendFormat": "socket seconds/min",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "rate(synora_stt_stream_segments_total[5m]) * 60",
+          "legendFormat": "segments/min",
+          "range": true,
+          "instant": false,
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     }
   ],
   "annotations": {

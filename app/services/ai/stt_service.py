@@ -179,23 +179,23 @@ async def transcribe(
 
     if not audio:
         raise BadRequestError("The upload is empty.", code="stt_audio_empty")
+
     # Both ceilings are checked before the wallet is touched, for the reason
     # `tts_service` checks its character limit there: a refusal after a hold is
     # credit that has to be given back, and a release never written cannot leak.
-    if len(audio) > settings.stt_max_audio_bytes:
-        raise BadRequestError(
-            f"This upload is {len(audio):,} bytes; the limit is "
-            f"{settings.stt_max_audio_bytes:,}.",
-            code="stt_audio_too_large",
-        )
-
-    estimated_ms = estimate_ms(audio)
-    if estimated_ms > settings.stt_max_audio_seconds * 1000:
-        raise BadRequestError(
-            f"This audio is about {estimated_ms // 1000} seconds; the limit is "
-            f"{settings.stt_max_audio_seconds}. Split it, or use a batch job.",
-            code="stt_audio_too_long",
-        )
+    #
+    # Duration first, but only when it is *known* — a WAV header gives it
+    # exactly. For anything else the duration is inferred from the byte count
+    # and is deliberately an over-estimate, so leading with it would tell a
+    # caller their thirty-minute recording is fifty minutes long. There, size
+    # is the number we can actually defend.
+    exact_ms = wav_duration_ms(audio)
+    if exact_ms is not None:
+        _refuse_if_too_long(exact_ms, exact=True)
+    _refuse_if_too_large(audio, exact_ms)
+    estimated_ms = exact_ms if exact_ms is not None else estimate_ms(audio)
+    if exact_ms is None:
+        _refuse_if_too_long(estimated_ms, exact=False)
 
     digest = session_service.request_digest_for(
         filename, content_type, language, len(audio), estimated_ms
@@ -319,6 +319,56 @@ async def transcribe(
         price_micros=settlement.price_micros,
         infer_seconds=_float_or_none(payload.get("infer_seconds")),
         replayed=False,
+    )
+
+
+def _refuse_if_too_long(audio_ms: int, *, exact: bool) -> None:
+    if audio_ms <= settings.stt_max_audio_seconds * 1000:
+        return
+    about = "" if exact else "about "
+    raise BadRequestError(
+        f"This audio is {about}{audio_ms // 1000} seconds; the limit is "
+        f"{settings.stt_max_audio_seconds}. Split it into shorter clips.",
+        code="stt_audio_too_long",
+    )
+
+
+def _refuse_if_too_large(audio: bytes, exact_ms: int | None) -> None:
+    """Refuse an over-large upload, and say what to do about it.
+
+    The plain version of this message — "N bytes, the limit is M" — is a wall.
+    It is also, nine times out of ten, the wrong diagnosis of the caller's
+    problem: they did not record something enormous, they recorded five minutes
+    of speech as uncompressed 48 kHz WAV, which is ten times the size of the
+    same audio as mp3 and not one bit more useful to a transcription model that
+    resamples to 16 kHz before it looks at anything.
+
+    A WAV header tells us that for certain — the duration is in it — so when
+    the file is one, the refusal names the cause and the fix instead of the
+    number. It is the same information a support reply would contain, and this
+    way nobody has to write the support reply.
+    """
+    limit = settings.stt_max_audio_bytes
+    if len(audio) <= limit:
+        return
+
+    advice = ""
+    if exact_ms:
+        # What the same speech would weigh compressed, using the bitrate the
+        # hold estimate already assumes. Deliberately the same constant: a
+        # caller who follows this advice lands inside the estimate too.
+        compressed_mb = (exact_ms / 1000) * settings.stt_assumed_bytes_per_second / 1_048_576
+        advice = (
+            f" This is {exact_ms // 1000} seconds of uncompressed audio; the "
+            f"same recording as mp3 or m4a would be around "
+            f"{max(0.1, compressed_mb):.1f} MB. Transcription resamples to "
+            f"16 kHz, so compressing costs nothing."
+        )
+
+    raise BadRequestError(
+        f"This upload is {len(audio) / 1_048_576:.1f} MB; the limit is "
+        f"{limit / 1_048_576:.0f} MB.{advice}",
+        code="stt_audio_too_large",
     )
 
 

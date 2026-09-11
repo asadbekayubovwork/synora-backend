@@ -64,6 +64,18 @@ async def get_user_from_refresh_token(session: AsyncSession, token: str) -> User
     return await _user_from_token(session, token, "refresh")
 
 
+async def get_user_from_access_token(session: AsyncSession, token: str) -> User:
+    """The same checks as `CurrentUser`, for a caller that is not an HTTP route.
+
+    The websocket route needs them: a browser cannot put a header on a
+    `WebSocket`, so the token arrives in the `start` message instead and there
+    is no `Depends` to hang this on. Everything a signed-in user must satisfy —
+    the signature, the type, active, verified — is `_user_from_token`'s, and it
+    stays there so the two paths cannot drift.
+    """
+    return await _user_from_token(session, token, "access")
+
+
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 

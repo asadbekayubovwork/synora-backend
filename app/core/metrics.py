@@ -187,6 +187,32 @@ stt_upstream_errors = Counter(
     ("code",),
     registry=REGISTRY,
 )
+stt_stream_sessions = Counter(
+    "synora_stt_stream_sessions_total",
+    "Realtime transcription sessions that reached a settlement, by how they "
+    "ended — a client that hung up, a stop it asked for, the cap, or a socket "
+    "that went quiet.",
+    ("end_reason",),
+    registry=REGISTRY,
+)
+stt_stream_seconds = Counter(
+    "synora_stt_stream_seconds_total",
+    "Wall-clock seconds realtime sockets were open and charged for. Larger "
+    "than the audio total by however much silence VAD trimmed.",
+    registry=REGISTRY,
+)
+stt_stream_segments = Counter(
+    "synora_stt_stream_segments_total",
+    "Transcript segments VAD closed and we relayed.",
+    registry=REGISTRY,
+)
+stt_streams_inflight = Gauge(
+    "synora_stt_streams_inflight",
+    "Realtime sessions with an open upstream socket right now. Each one holds "
+    "a GPU slot upstream for its whole duration.",
+    registry=REGISTRY,
+)
+
 stt_audio_seconds = Counter(
     "synora_stt_audio_seconds_total",
     "Seconds of audio transcribed and charged for, as upstream counted them.",
@@ -375,6 +401,16 @@ def observe_stt_upstream(*, seconds: float) -> None:
 
 def record_stt_upstream_error(*, code: str) -> None:
     stt_upstream_errors.labels(code=code).inc()
+
+
+def record_stream_session(
+    *, seconds: float, segments: int = 0, end_reason: str = "completed"
+) -> None:
+    """One realtime session, settled. Counted where the settlement happened."""
+    stt_stream_sessions.labels(end_reason=end_reason).inc()
+    stt_stream_seconds.inc(seconds)
+    if segments:
+        stt_stream_segments.inc(segments)
 
 
 def record_transcription(*, audio_seconds: float) -> None:

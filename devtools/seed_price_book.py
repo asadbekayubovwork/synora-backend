@@ -42,6 +42,17 @@ PLACEHOLDER_PRICES = [
     ("tts", "tts_characters", 1_000, 250_000, 100_000, 0),
     # Speech to text, per minute of audio.
     ("stt", "stt_audio_ms", MINUTE_MS, 1_200_000, 500_000, 0),
+    # The connection fee on a realtime transcription socket, charged beside the
+    # audio above. It exists because VAD bills only the speech it closed a
+    # segment on, and a caller who opens a socket and says nothing still holds
+    # a GPU slot upstream for the whole session.
+    #
+    # No `min_charge` deliberately, unlike the voice agent's session line: CEIL
+    # to the started minute already *is* the floor here — the smallest
+    # chargeable session is one minute at 200 000 — so a minimum below that
+    # would be configuration that reads as load-bearing and does nothing. Set
+    # one the day this is priced per second.
+    ("stt", "session_ms", MINUTE_MS, 200_000, 100_000, 0),
     # Chat, per 1000 tokens. Cached input is cheap because it is cheap for us.
     ("chat", "llm_input_tokens", 1_000, 3_000_000, 1_000_000, 0),
     ("chat", "llm_cached_input_tokens", 1_000, 300_000, 100_000, 0),

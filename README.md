@@ -83,6 +83,7 @@ All under `/api/v1`.
 | `GET`  | `/tts/recordings/{id}/audio` | Play it back. Costs nothing |
 | `DELETE` | `/tts/recordings/{id}` | Erase one |
 | `POST` | `/stt/transcribe` | Transcribe an upload. Metered by duration |
+| `WS`   | `/stt/stream` | Live transcription. Metered by speech + connection |
 | `GET`  | `/stt/transcriptions` | Every transcription this account has kept |
 | `GET`  | `/stt/transcriptions/{id}/audio` | The audio that was uploaded |
 | `DELETE` | `/stt/transcriptions/{id}` | Erase one |
@@ -637,7 +638,27 @@ Worth being deliberate about: what is kept here is audio a *user* uploaded — a
 meeting, a call, a voice note — rather than speech we produced.
 `RECORDINGS_ENABLED=false` turns off both.
 
-The whole contract, with the error table: [docs/STT.md](docs/STT.md).
+### Live transcription
+
+`WS /stt/stream` is the same gateway over a websocket: send PCM16 as it is
+captured, get a `final` back per segment as the speaker pauses, and a `done`
+carrying the bill. `speech_started` is relayed unchanged because it is the
+caller's barge-in trigger.
+
+It is **the first live session this codebase bills**, and it is a bounded
+one-shot rather than a lifecycle: `session_service` has no hold extension yet,
+so credit is reserved for the whole `STT_STREAM_MAX_SECONDS` cap and the
+remainder comes back at settlement. The honest cost of that shortcut is that an
+account with less than the ceiling cannot open a stream at all; hold extension
+is the work that removes it.
+
+Two metrics are charged, and they differ: `stt_audio_ms` is what VAD closed a
+segment on and `session_ms` is the wall clock. A fifteen-second test call was
+14.6 seconds of speech across a socket open for 16.2 — VAD trims the silence,
+and the connection fee is what covers a GPU slot held in it.
+
+The whole contract, with the protocol and the error table:
+[docs/STT.md](docs/STT.md).
 
 ## The Nuxt frontend
 
@@ -735,6 +756,7 @@ Everything lives in `.env`; see [.env.example](.env.example) for the full list.
 | `BILLING_HOLD_SECONDS` | `120` | How much of a realtime session to reserve up front |
 | `BILLING_ROLLUP_TIMEZONE` | `Asia/Tashkent` | Local day boundary for usage reports |
 | `TTS_BASE_URL` / `TTS_API_KEY` | unset | Unset ⇒ every `/tts` route answers `503`. One without the other is refused at boot. Full list in [docs/TTS.md](docs/TTS.md#configuration) |
+| `STT_STREAM_MAX_SECONDS` / `STT_STREAM_IDLE_SECONDS` | `600` / `60` | The cap on one live socket — and the size of its up-front hold — and how long it may stay silent |
 | `STT_BASE_URL` / `STT_API_KEY` | unset | Unset ⇒ `/stt/transcribe` answers `503`. Sent as `X-Token`, not `X-API-Key`. Full list in [docs/STT.md](docs/STT.md#configuration) |
 | `RECORDINGS_ENABLED` / `RECORDINGS_DIR` | `true` / `data/recordings` | Keep the text and the audio of every delivered synthesis. `false` keeps neither |
 | `METRICS_ENABLED` / `METRICS_TOKEN` | `true` / unset | `GET /metrics`. Outside development it answers `404` until a token is set — nginx proxies `location /`, so the endpoint is public the moment it exists |
@@ -849,6 +871,8 @@ app/
 │   │   ├── tts_recording_service.py  Rows for delivered audio, and ownership
 │   │   ├── stored_audio.py      Is any table still using this file?
 │   │   ├── stt_client.py        The transcription box. X-Token, multipart
+│   │   ├── stt_stream_client.py The same box's websocket
+│   │   ├── stt_stream_service.py A live session: hold the ceiling, relay, settle
 │   │   ├── stt_service.py       Estimate, hold, transcribe, settle
 │   │   ├── tts_client.py        The speech box, and nothing else. No money
 │   │   ├── tts_service.py       One metered stream: hold, relay, settle

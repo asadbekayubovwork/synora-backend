@@ -30,6 +30,15 @@ redis>=5.2,<7
 # RABBITMQ_URL never needs it installed; see `app/core/broker.py`.
 aio-pika>=9.4,<10
 
+# The realtime transcription gateway's own upstream socket. Already present
+# through `uvicorn[standard]`, and named here because `app/services/ai/
+# stt_stream_client.py` imports it directly — a transitive dependency that
+# something else happens to pull is one a release can drop without warning.
+# `certifi` for the same reason: `websockets` uses the standard library's
+# default SSL context, which on a python.org macOS build has no CA bundle.
+websockets>=13,<18
+certifi>=2024.2
+
 # Multipart form parsing, for the one route that takes an upload:
 # `POST /stt/transcribe`. FastAPI imports it lazily and raises at request time
 # without it, so an absent dependency is a 500 on a route the OpenAPI document

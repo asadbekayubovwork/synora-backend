@@ -256,6 +256,10 @@ async def price_book(session) -> PriceBookVersion:
         [
             price(BillingService.TTS, UsageMetric.TTS_CHARACTERS, unit=1000, rate=250_000, cost=100_000),
             price(BillingService.STT, UsageMetric.STT_AUDIO_MS, unit=minute, rate=1_200_000, cost=500_000),
+            # The realtime socket's connection fee, beside the audio. No
+            # minimum: CEIL to the started minute is already the floor, which
+            # `test_stt_stream.py` asserts on directly.
+            price(BillingService.STT, UsageMetric.SESSION_MS, unit=minute, rate=200_000),
             price(BillingService.CHAT, UsageMetric.LLM_INPUT_TOKENS, unit=1000, rate=3_000_000, cost=1_000_000),
             price(BillingService.CHAT, UsageMetric.LLM_CACHED_INPUT_TOKENS, unit=1000, rate=300_000),
             price(BillingService.CHAT, UsageMetric.LLM_OUTPUT_TOKENS, unit=1000, rate=12_000_000, cost=4_000_000),

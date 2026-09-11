@@ -1,6 +1,12 @@
 # Synora speech to text
 
-One route, what it charges, and when the charge lands.
+Two ways in, what they charge, and when the charge lands.
+
+| You want | Route | What it costs |
+| --- | --- | --- |
+| One file transcribed | `POST /stt/transcribe` | The duration the service measured |
+| Live text as somebody speaks | `WS /stt/stream` | The speech, plus a connection fee |
+| What you transcribed, and the audio back | `GET /stt/transcriptions` | Nothing |
 
 Like the speech side, this is a **gateway** rather than a wrapper. The
 transcription box upstream holds one token, that token never leaves this
@@ -64,6 +70,22 @@ after a hold has been placed.
 | Duration | 10 minutes | `400 stt_audio_too_long` |
 | Empty body | — | `400 stt_audio_empty` |
 
+**Send compressed audio.** The two limits are independent, and for uncompressed
+WAV the size one bites first — long before ten minutes:
+
+| Format | Ten minutes weighs | Verdict |
+| --- | --- | --- |
+| mp3 / m4a at 128 kbps | ~9 MB | fits, with room |
+| WAV 16 kHz mono | 18 MB | fits |
+| WAV 48 kHz mono | 55 MB | refused at ~4.5 minutes |
+| WAV 48 kHz stereo | 110 MB | refused at ~2 minutes |
+
+Nothing is lost by compressing: the service resamples to 16 kHz mono before it
+transcribes, so a 48 kHz stereo WAV is ten times the bytes for identical text.
+A WAV that is refused on size says so in its message, with the duration read
+out of its own header and an estimate of what the same audio would weigh
+compressed.
+
 ---
 
 ## What a call costs, and when
@@ -125,6 +147,93 @@ Audio the service cannot decode, a language it does not serve, a model that is
 still loading, a network that dropped — every one of them releases the hold in
 full and writes no usage event. The only thing that is billed is a response
 that arrived.
+
+---
+
+## `WS /stt/stream` — realtime
+
+Live transcription over a websocket: send audio as it is captured, get a
+transcript back per segment as the speaker pauses. OpenAPI cannot describe a
+websocket, which is why this section exists instead of a `responses=` block.
+
+```
+wss://…/api/v1/stt/stream
+
+→ {"type":"start","token":"<access token>","language":"uz","sample_rate":16000}
+→ binary frames: little-endian PCM16, mono, at the declared rate
+→ {"type":"stop"}
+
+← {"type":"ready","ai_session_id":"…","max_seconds":600}
+← {"type":"speech_started"}
+← {"type":"final","seq":0,"text":"Assalomu alaykum","language":"uz","audio_ms":1136}
+← {"type":"done","segments":6,"audio_ms":14576,"session_ms":16177,
+    "price":"1.400000","price_micros":1400000,"end_reason":"stop_requested"}
+← {"type":"error","code":"…","message":"…"}
+```
+
+**The token goes in the `start` message, not in the query string.** A browser
+cannot set headers on a `WebSocket`, so something has to carry it — and a URL
+is the one place a credential must not go, because query strings land in nginx
+access logs, in `Referer` headers and in error reports. A non-browser client
+may send `Authorization: Bearer` instead; that is checked first.
+
+**Wait for `done`, not for the first `final`.** One spoken turn routinely
+closes several VAD segments — a fifteen-second voicemail in testing produced
+six — so a client that closes on the first one truncates its own transcript.
+`done` is also where the bill is.
+
+`speech_started` is relayed unchanged from the model's VAD and is the
+**barge-in trigger**: the moment to stop whatever your agent is playing.
+
+### What a live session costs
+
+Two metrics, and they are not the same number:
+
+| Metric | What it is |
+| --- | --- |
+| `stt_audio_ms` | the audio VAD closed a segment on — the speech |
+| `session_ms` | the wall clock the socket was open |
+
+Both are charged. Audio alone would let a caller hold a GPU slot open in
+silence for nothing, and the transcription service's own documentation is
+explicit that a live session occupies the card for its whole duration. Wall
+clock alone would charge the same for ten minutes of speech as for ten minutes
+of nothing, and would make the identical recording cost differently depending
+on whether it was streamed or uploaded.
+
+The gap between them is real and worth expecting on an invoice: the test call
+above was **14.6 seconds of speech across a socket open for 16.2 seconds**. VAD
+trims the silence; the connection fee covers it.
+
+### The hold is the ceiling
+
+Credit is reserved up front for the **whole cap** — `STT_STREAM_MAX_SECONDS` of
+connection *and* the same span of continuous speech — because a websocket has
+no length until it ends. At the seeded prices a ten-minute cap reserves about
+14 credits, and everything unused comes back at settlement.
+
+That is a real constraint, stated plainly: **an account with less than the
+ceiling cannot open a stream at all**, even to ask a ten-second question. The
+fix is hold extension mid-session, which this API does not have yet; until it
+does, `STT_STREAM_MAX_SECONDS` is the dial.
+
+### How a session ends
+
+| `end_reason` | Cause |
+| --- | --- |
+| `stop_requested` | you sent `{"type":"stop"}` |
+| `client_disconnected` | the socket dropped |
+| `grace_exhausted` | the session hit `STT_STREAM_MAX_SECONDS` |
+| `heartbeat_timeout` | no audio for `STT_STREAM_IDLE_SECONDS` |
+| `upstream_error` | the transcription service went away |
+
+Every one of them settles. Whatever ended the socket, `stop` is still sent
+upstream first, so segments it has already closed — transcript you have paid
+for — are not thrown away.
+
+A handshake the service refuses charges nothing at all: no audio moved, the
+hold goes back whole, and the `error` event carries the same code the file
+route would have returned.
 
 ---
 
@@ -210,7 +319,9 @@ Branch on `code`, never on the message text.
 | `stt_busy` | 429 | Upstream is saturated | Honour `Retry-After` |
 | `stt_rejected_input` | 400 | Upstream refused **your** audio or language. The message is its own | Fix the file; do not retry unchanged |
 | `stt_language_unsupported` | 400 | Not one of `uz`, `ru`, `en` | Ours, before any hold |
-| `stt_audio_too_large` / `stt_audio_too_long` / `stt_audio_empty` | 400 | Past a ceiling, or nothing at all | Ours, before any hold |
+| `stt_audio_too_large` | 400 | Past the size ceiling. For a WAV the message says how long it is and what it would weigh compressed | Compress it. Ours, before any hold |
+| `stt_audio_too_long` | 400 | Past the duration ceiling — exact for WAV, an over-estimate for compressed audio | Split it. Ours, before any hold |
+| `stt_audio_empty` | 400 | Nothing at all | Ours, before any hold |
 | `stt_unreachable` | 502 | Timeout, transport failure, redirect or upstream 5xx | Retry with backoff |
 | `stt_unreadable` | 502 | A 2xx we could not parse as a transcript | Retry once, then report it |
 | `stt_idempotency_spent` | 409 | This key has already been charged | Send a new key |
@@ -242,6 +353,8 @@ open a second session.
 | `STT_MAX_AUDIO_BYTES` | `26214400` | 25 MB |
 | `STT_MAX_AUDIO_SECONDS` | `600` | Past this, a caller wants a job rather than a request that hangs |
 | `STT_ASSUMED_BYTES_PER_SECOND` | `8000` | For the hold only, and only for compressed audio |
+| `STT_STREAM_MAX_SECONDS` | `600` | The cap on one live session, and what its hold is priced from |
+| `STT_STREAM_IDLE_SECONDS` | `60` | A socket that sends no audio for this long is closed and settled |
 | `RECORDINGS_ENABLED` / `RECORDINGS_DIR` | `true` / `data/recordings` | Keep the transcript and the uploaded audio. One switch over both gateways |
 
 Prices are not here. They live in the database, versioned, and are published

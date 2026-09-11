@@ -17,14 +17,29 @@ from __future__ import annotations
 
 import logging
 
+import asyncio
+import contextlib
 import uuid
 
-from fastapi import APIRouter, File, Form, Header, Path, Query, Request, Response, UploadFile
+from fastapi import (
+    APIRouter,
+    File,
+    Form,
+    Header,
+    Path,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse
 
-from app.api.deps import CurrentUser, SessionDep
+from app.api.deps import CurrentUser, SessionDep, get_user_from_access_token
 from app.core.config import settings
-from app.core.exceptions import BadRequestError, NotFoundError
+from app.core.exceptions import AppError, BadRequestError, NotFoundError
+from app.db.session import SessionLocal
 from app.schemas.auth import ErrorResponse
 from app.schemas.common import Cursor, MessageResponse, PageInfo, clamp_limit, decode_cursor
 from app.schemas.stt import (
@@ -38,6 +53,7 @@ from app.services.ai import (
     recording_store,
     stt_client,
     stt_service,
+    stt_stream_service,
     stt_transcription_service,
 )
 from app.services.billing.session_service import MAX_CLIENT_IDEMPOTENCY_KEY
@@ -45,6 +61,11 @@ from app.services.billing.session_service import MAX_CLIENT_IDEMPOTENCY_KEY
 logger = logging.getLogger("synora.stt")
 
 router = APIRouter(prefix="/stt", tags=["STT"])
+
+# How long a socket may stay open having said nothing. A connection that never
+# sends `start` costs a file descriptor and holds no credit, so this is tidiness
+# rather than protection — but an untidy server accumulates them.
+_START_TIMEOUT_SECONDS = 15
 
 ERRORS: dict[int | str, dict] = {
     400: {
@@ -102,7 +123,12 @@ ERRORS: dict[int | str, dict] = {
         "Languages are `uz`, `ru` and `en`; anything else is refused here "
         "rather than after a hold has been placed. The ceilings are "
         f"{settings.stt_max_audio_bytes // (1024 * 1024)} MB and "
-        f"{settings.stt_max_audio_seconds // 60} minutes.\n\n"
+        f"{settings.stt_max_audio_seconds // 60} minutes — and **send "
+        "compressed audio**, because for uncompressed WAV the size ceiling "
+        "bites long before the duration one: ten minutes is 18 MB at 16 kHz "
+        "mono and 55 MB at 48 kHz. Nothing is lost by compressing, since the "
+        "service resamples to 16 kHz before transcribing. A WAV refused on "
+        "size is told how long it is and what it would weigh as mp3.\n\n"
         "An `Idempotency-Key` here means *do not charge twice*, and a key that "
         "has already been spent is a `409 stt_idempotency_spent` rather than a "
         "second transcription. It cannot return the first answer: transcripts "
@@ -325,3 +351,127 @@ async def delete_transcription(
         session, user_id=user.id, transcription_id=transcription_id
     )
     return MessageResponse(message="Transcription deleted.")
+
+
+# --- realtime ----------------------------------------------------------------
+
+
+class _Socket:
+    """`stt_stream_service.ClientSocket`, over a FastAPI websocket.
+
+    An adapter rather than passing the `WebSocket` straight through, so the
+    service can be driven by a fake: what is under test there is a wallet, and
+    it should not need a socket to check it.
+    """
+
+    def __init__(self, websocket: WebSocket) -> None:
+        self._websocket = websocket
+
+    async def receive(self) -> dict:
+        return await self._websocket.receive()
+
+    async def send_json(self, message: dict) -> None:
+        await self._websocket.send_json(message)
+
+
+@router.websocket("/stream")
+async def stream(websocket: WebSocket) -> None:
+    """Realtime transcription over a websocket. Not in the OpenAPI document.
+
+    OpenAPI cannot describe a websocket, which is why the protocol lives in
+    `docs/STT.md` instead of in a `responses=` block.
+
+        → {"type":"start","token":"<access token>","language":"uz","sample_rate":16000}
+        → binary frames: little-endian PCM16, mono, at the declared rate
+        → {"type":"stop"}
+
+        ← {"type":"ready","ai_session_id":"…","max_seconds":600}
+        ← {"type":"speech_started"}                      the barge-in trigger
+        ← {"type":"final","seq":0,"text":"…","audio_ms":2100}
+        ← {"type":"done","segments":3,"audio_ms":5040,"price":"1.400000", …}
+        ← {"type":"error","code":"…","message":"…"}
+
+    **The token goes in the `start` message, not in the query string.** A
+    browser cannot set headers on a `WebSocket`, so something has to carry it,
+    and a URL is the one place a credential must not go: query strings land in
+    nginx access logs, in `Referer` headers, and in any error report the page
+    files. A non-browser client may use `Authorization: Bearer` instead, which
+    is checked first.
+
+    **Wait for `done`, not for the first `final`.** One spoken turn routinely
+    closes several VAD segments, so a client that closes on the first one
+    truncates its own transcript — and `done` is also where the bill is.
+    """
+    await websocket.accept()
+    client_ip = websocket.client.host[:64] if websocket.client else None
+    user_agent = websocket.headers.get("user-agent")
+
+    try:
+        start = await asyncio.wait_for(
+            websocket.receive_json(), timeout=_START_TIMEOUT_SECONDS
+        )
+    except (TimeoutError, ValueError, KeyError):
+        # Nothing was opened and nothing held, so there is no session to close
+        # — just a socket that never said what it wanted.
+        await _refuse(websocket, "stt_stream_start_missing", "Send a `start` message first.")
+        return
+
+    if not isinstance(start, dict) or start.get("type") != "start":
+        await _refuse(websocket, "stt_stream_start_missing", "The first message must be `start`.")
+        return
+
+    header = websocket.headers.get("authorization", "")
+    scheme, _, credential = header.partition(" ")
+    token = credential if scheme.lower() == "bearer" and credential else start.get("token")
+    if not token:
+        await _refuse(websocket, "not_authenticated", "Authentication is required.")
+        return
+
+    try:
+        async with SessionLocal() as session:
+            user = await get_user_from_access_token(session, str(token))
+        language, sample_rate = stt_stream_service.validate_start(start)
+    except AppError as error:
+        await _refuse(websocket, error.code, str(error.detail))
+        return
+
+    outcome = None
+    try:
+        outcome = await stt_stream_service.run(
+            _Socket(websocket),
+            user,
+            language=language,
+            sample_rate=sample_rate,
+            client_ip=client_ip,
+            user_agent=user_agent[:255] if user_agent else None,
+        )
+    except AppError as error:
+        # Upstream refused before a word was transcribed. The hold is already
+        # back — `stt_stream_service.run` sees to that — so this is only the
+        # telling.
+        await _refuse(websocket, error.code, str(error.detail))
+        return
+    except WebSocketDisconnect:
+        # The client went away mid-session. It is already settled; there is
+        # nobody left to send `done` to.
+        return
+    finally:
+        if outcome is not None:
+            with contextlib.suppress(Exception):
+                await websocket.send_json(stt_stream_service.done_message(outcome))
+            with contextlib.suppress(Exception):
+                await websocket.close()
+
+
+async def _refuse(websocket: WebSocket, code: str, message: str) -> None:
+    """Say why, then close. The event first, because a close code is four digits.
+
+    `1008` is "policy violation", which is the nearest thing the websocket
+    vocabulary has to "your request was refused" — and it says nothing about
+    *which* refusal, so the JSON goes first and carries the same `code` every
+    HTTP route on this API would have returned.
+    """
+    with contextlib.suppress(Exception):
+        await websocket.send_json({"type": "error", "code": code, "message": message})
+    with contextlib.suppress(Exception):
+        await websocket.close(code=1008, reason=code[:120])

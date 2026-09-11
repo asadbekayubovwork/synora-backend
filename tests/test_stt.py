@@ -409,6 +409,65 @@ async def test_an_upload_past_the_size_ceiling_is_refused_before_the_hold(
     assert upstream.requests == []
 
 
+async def test_an_over_large_wav_is_told_why_it_is_over_large(
+    client, session, price_book, upstream, monkeypatch
+):
+    """The wall, turned into an instruction.
+
+    Five minutes of speech recorded as uncompressed 48 kHz WAV is 27 MB and the
+    same speech as mp3 is two — and a transcription model resamples to 16 kHz
+    before it looks at anything, so the big file bought nothing. "27 MB, the
+    limit is 25" is a true message that diagnoses none of that; the header is
+    right there and says how long the audio is, so the refusal can.
+    """
+    monkeypatch.setattr(settings, "stt_max_audio_bytes", 1_000_000)
+    token = await funded(client, session, "uncompressed@example.com")
+
+    response = await post(client, token, wav(60_000, sample_rate=48_000))
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert response.json()["code"] == "stt_audio_too_large"
+    assert "60 seconds of uncompressed audio" in detail
+    assert "mp3" in detail
+    assert "16 kHz" in detail
+
+
+async def test_an_over_large_file_we_cannot_read_is_not_told_a_guess(
+    client, session, price_book, upstream, monkeypatch
+):
+    """No header, no diagnosis.
+
+    The duration of a compressed file is an over-estimate on our side, and a
+    refusal that announced "this is about fifty minutes" for a thirty-minute
+    recording would be confidently wrong. Size is the number we can defend.
+    """
+    monkeypatch.setattr(settings, "stt_max_audio_bytes", 1_000)
+    token = await funded(client, session, "opaque@example.com")
+
+    response = await post(client, token, b"ID3" + b"\x00" * 5_000)
+
+    detail = response.json()["detail"]
+    assert response.json()["code"] == "stt_audio_too_large"
+    assert "uncompressed" not in detail
+    assert "seconds" not in detail
+
+
+async def test_a_long_wav_is_refused_on_its_real_duration_not_its_size(
+    client, session, price_book, upstream, monkeypatch
+):
+    """Duration first when it is known, because "split it" is the useful fix."""
+    monkeypatch.setattr(settings, "stt_max_audio_seconds", 60)
+    monkeypatch.setattr(settings, "stt_max_audio_bytes", 1_000)
+    token = await funded(client, session, "longandbig@example.com")
+
+    response = await post(client, token, wav(120_000))
+
+    assert response.json()["code"] == "stt_audio_too_long"
+    # Exact, so no hedging word: the header said 120 seconds.
+    assert "about" not in response.json()["detail"]
+
+
 async def test_an_empty_upload_is_refused(client, session, price_book, upstream):
     token = await funded(client, session, "silent@example.com")
 

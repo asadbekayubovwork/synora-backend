@@ -365,6 +365,7 @@ async def open_oneshot(
     idempotency_key: str | None = None,
     request_digest: str | None = None,
     ttl_seconds: int = DEFAULT_ONESHOT_TTL_SECONDS,
+    kind: AiSessionKind = AiSessionKind.ONESHOT,
     client_ip: str | None = None,
     user_agent: str | None = None,
 ) -> Ticket:
@@ -444,7 +445,12 @@ async def open_oneshot(
         user_id=user_id,
         wallet_id=snapshot.wallet_id,
         service=service,
-        kind=AiSessionKind.ONESHOT,
+        # `ONESHOT` unless a caller says otherwise. The realtime transcription
+        # gateway passes `REALTIME`: it settles through this same hold-and-
+        # charge path, so it is a one-shot mechanically, and it is a live
+        # session to anyone reading the table — which is the question this
+        # column exists to answer.
+        kind=kind,
         status=AiSessionStatus.PENDING,
         model_key=model_key,
         # Pinned now and never re-resolved. A price book published while the

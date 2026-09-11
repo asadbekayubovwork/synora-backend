@@ -146,6 +146,22 @@ class Settings(BaseSettings):
     # work, which is the one error nobody notices. WAV and PCM never use this;
     # their duration is read out of the header exactly.
     stt_assumed_bytes_per_second: int = 8_000
+    # --- realtime transcription ---
+    # The ceiling on one websocket session, and what the hold is priced from:
+    # this is a one-shot with a bound rather than a lifecycle with hold
+    # extension, so the number is both the cap and the up-front reservation.
+    # Ten minutes of connection plus ten minutes of continuous speech is the
+    # worst case a session can cost, and the difference comes back at
+    # settlement.
+    #
+    # It is also a fairness limit on the GPU. Upstream's own documentation
+    # says a long call occupies the card for its whole duration and delays
+    # every live session sharing that instance.
+    stt_stream_max_seconds: int = 600
+    # A socket that has sent no audio for this long is closed and settled. It
+    # is what stops an abandoned browser tab from holding a GPU slot and a
+    # wallet's credit until the reaper comes past.
+    stt_stream_idle_seconds: int = 60
 
     # --- Recordings --------------------------------------------------------
     # Keep every delivered synthesis: its text and parameters in
@@ -363,6 +379,8 @@ class Settings(BaseSettings):
             problems.append("STT_MAX_AUDIO_* must be positive")
         if self.stt_assumed_bytes_per_second < 1:
             problems.append("STT_ASSUMED_BYTES_PER_SECOND must be positive")
+        if self.stt_stream_max_seconds < 1 or self.stt_stream_idle_seconds < 1:
+            problems.append("STT_STREAM_* must be positive")
 
         # SQLite serialises writers and silently ignores `FOR UPDATE`. It is
         # fine for development and for the tests; it is not a money database.
