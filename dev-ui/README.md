@@ -54,6 +54,7 @@ o'qiy oladi.
 | Batch | `POST/GET /tts/batch`, `GET /tts/batch/{id}`, `/results`, `DELETE` |
 | Ovozlar | `GET/POST /tts/voices`, `DELETE /tts/voices/{id}` |
 | Matnga | `POST /stt/transcribe` — fayl yuklash yoki oxirgi sintezni qaytarib o'qish |
+| Jonli | `WS /stt/stream` — mikrofondan real vaqtda transkripsiya |
 | Usage | `GET /usage` |
 | Wallet | `GET /wallet`, `GET /wallet/transactions` (kursor bilan) |
 | Admin | `credits`, `freeze`, `unfreeze`, `GET /admin/wallets/{id}`, `reconcile` |
@@ -96,6 +97,38 @@ shlyuz, ikkala hisob-kitob va ikkala `reserved` bir bosishda ko'rinadi.
 
 STT sozlanmagan bo'lsa (`STT_BASE_URL` yo'q) route `503 stt_not_configured`
 qaytaradi — TTS bilan bir xil qoida.
+
+## Realtime STT ni sinash
+
+Ikki yo'l bor.
+
+**Mikrofon bilan** — **Jonli** yorlig'i. "mikrofonni yoqish" bosasiz, brauzer
+ruxsat so'raydi, gapirasiz. Har bir gap tugaganda VAD segmentni yopadi va matn
+darhol chiqadi; yashil `▍` — `speech_started`, ya'ni voice-agent uchun barge-in
+signali. "to'xtatish" bosilganda `stop` ketadi va `done` hisobni qaytaradi.
+
+Brauzer mikrofoni odatda 44.1 yoki 48 kHz da ishlaydi; sahifa
+`AudioContext({sampleRate: 16000})` bilan qayta namunalashni brauzerga
+topshiradi va faqat PCM16 ni uzatadi.
+
+**Fayldan** — mikrofonsiz mashina yoki takrorlanadigan kirish uchun:
+
+```bash
+python dev-ui/stream_file.py clip.wav --language uz
+```
+
+Audio real vaqt tezligida yuboriladi, ataylab: faylni tez otib yuborish ham
+transkripsiya beradi, lekin kechikish haqida hech nima aytmaydi va
+`session_ms` ni ma'nosiz qiladi.
+
+Klip mono PCM16 bo'lishi kerak:
+
+```bash
+ffmpeg -i input.m4a -ar 16000 -ac 1 -c:a pcm_s16le clip.wav
+```
+
+Chap paneldagi `reserved` ni kuzating: sessiya ochilganda shift band qilinadi
+(standart 10 daqiqa ≈ 14 kredit) va `done` da ortig'i qaytadi.
 
 ## Tokenlar haqida
 

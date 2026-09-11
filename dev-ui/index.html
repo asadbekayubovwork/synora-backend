@@ -145,6 +145,7 @@
       <button data-tab="voices">Ovozlar</button>
       <button data-tab="recordings">Yozuvlar</button>
       <button data-tab="stt">Matnga</button>
+      <button data-tab="live">Jonli</button>
       <button data-tab="usage">Usage</button>
       <button data-tab="wallet">Wallet</button>
       <button data-tab="admin">Admin</button>
@@ -360,6 +361,41 @@ bob2 | Ikkinchi bob.</textarea>
           ataylab yuqoriroq olinadi, shuning uchun <code>reserved</code> bir zum
           narxdan katta ko'rinib, so'ng qaytadi. Xizmat rad etsa — hech nima
           olinmaydi.
+        </div>
+      </div>
+    </div>
+
+    <!-- ---------------------------------------------------------- live -->
+    <div class="tab" id="tab-live">
+      <div class="body">
+        <div class="grid2">
+          <div><label>Til</label><select id="liveLang">
+            <option selected>uz</option><option>ru</option><option>en</option>
+          </select></div>
+          <div><label>Holat</label><div class="tok" id="liveState" style="max-height:none">ulanmagan</div></div>
+        </div>
+        <div class="row">
+          <button id="btnLiveStart" class="primary">mikrofonni yoqish</button>
+          <button id="btnLiveStop" class="danger" disabled>to'xtatish</button>
+          <span class="hint" style="margin:0" id="liveLevel"></span>
+        </div>
+
+        <div class="card" id="liveCard" style="display:none">
+          <h3>Transkript</h3>
+          <div id="liveText" style="font-size:15px;line-height:1.7;min-height:40px"></div>
+          <div class="kv" id="liveKv" style="margin-top:10px"></div>
+        </div>
+
+        <div class="hint">
+          Mikrofon 16 kHz mono PCM16 ga o'tkazilib, <code>WS /stt/stream</code> ga
+          yuboriladi. Har bir <b>final</b> — VAD yopgan bitta segment; bitta
+          gapda bir nechtasi bo'lishi odatiy, shuning uchun klient
+          <code>done</code> ni kutadi, birinchi <code>final</code> ni emas.
+          Yashil chiziq — <code>speech_started</code>, ya'ni barge-in signali.<br><br>
+          Hisob shiftdan boshlanadi: sessiya ochilishida
+          <code>STT_STREAM_MAX_SECONDS</code> ga yetadigan kredit band qilinadi va
+          ortig'i <code>done</code> da qaytadi. Chap paneldagi <code>reserved</code>
+          shuni ko'rsatib turadi.
         </div>
       </div>
     </div>
@@ -1082,6 +1118,139 @@ bob2 | Ikkinchi bob.</textarea>
     if (!lastAudioBlob) { toast("Avval Nutq yorlig'ida bir narsa sintez qiling", true); return; }
     await transcribe(lastAudioBlob, "synthesised.wav");
   });
+
+  // ------------------------------------------------------------ live (WS)
+  //
+  // Mikrofon → 16 kHz mono PCM16 → websocket. `AudioContext({sampleRate})`
+  // qayta namunalashni brauzerning o'ziga topshiradi: qo'lda resampler yozish
+  // dev-ui uchun ortiqcha, va Chrome buni qo'llab-quvvatlaydi.
+  let liveSocket = null, liveAudio = null, liveStream = null, liveNode = null;
+
+  function liveSay(text, cls) {
+    $("liveState").textContent = text;
+    $("liveState").style.color = cls === "err" ? "var(--err)" : cls === "ok" ? "var(--ok)" : "";
+  }
+
+  async function liveStart() {
+    if (!store.access) { toast("Avval kiring", true); return; }
+    await walletNow();
+    $("liveCard").style.display = "";
+    $("liveText").innerHTML = "";
+    $("liveKv").innerHTML = "";
+
+    let mic;
+    try {
+      mic = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      });
+    } catch (e) {
+      liveSay("mikrofonga ruxsat berilmadi: " + e.message, "err");
+      return;
+    }
+    liveStream = mic;
+
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    liveAudio = ctx;
+    const source = ctx.createMediaStreamSource(mic);
+    // ScriptProcessor eskirgan, lekin AudioWorklet uchun alohida fayl kerak —
+    // dev-ui bitta HTML bo'lib qolishi kerak.
+    const node = ctx.createScriptProcessor(4096, 1, 1);
+    liveNode = node;
+
+    const url = store.base.replace(/^http/, "ws").replace(/\/$/, "") + "/stt/stream";
+    const ws = new WebSocket(url);
+    liveSocket = ws;
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        type: "start", token: store.access,
+        language: $("liveLang").value, sample_rate: 16000,
+      }));
+      liveSay("ulandi, start yuborildi");
+    };
+
+    ws.onmessage = (ev) => {
+      const m = JSON.parse(ev.data);
+      if (m.type === "ready") {
+        liveSay(`tayyor · sessiya ${short(m.ai_session_id)}… · maks ${m.max_seconds}s`, "ok");
+        walletNow();
+      } else if (m.type === "speech_started") {
+        $("liveText").insertAdjacentHTML("beforeend",
+          `<span style="color:var(--ok)">▍</span>`);
+      } else if (m.type === "final") {
+        $("liveText").insertAdjacentHTML("beforeend",
+          `<span title="${m.audio_ms} ms"> ${esc(m.text)}</span>`);
+      } else if (m.type === "done") {
+        liveSay(`tugadi (${m.end_reason})`, "ok");
+        $("liveKv").innerHTML =
+          `<span>segmentlar</span><span>${m.segments}</span>` +
+          `<span>nutq</span><span>${m.audio_ms} ms</span>` +
+          `<span>soket</span><span>${m.session_ms} ms</span>` +
+          `<span>narx</span><span>${esc(m.price)}</span>` +
+          `<span>sessiya</span><span>${short(m.ai_session_id)}…</span>`;
+        logEntry("WS", "/stt/stream", 200, m.session_ms, undefined, m);
+        liveCleanup();
+        walletNow();
+      } else if (m.type === "error") {
+        liveSay(`xato: ${m.code} — ${m.message}`, "err");
+        logEntry("WS", "/stt/stream", 400, 0, undefined, m);
+        toast(m.code + ": " + m.message, true);
+        liveCleanup();
+        walletNow();
+      }
+    };
+    ws.onerror = () => liveSay("soket xatosi", "err");
+    ws.onclose = () => { if (liveSocket === ws) liveCleanup(); };
+
+    node.onaudioprocess = (e) => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      const input = e.inputBuffer.getChannelData(0);
+      const pcm = new Int16Array(input.length);
+      let peak = 0;
+      for (let i = 0; i < input.length; i++) {
+        const v = Math.max(-1, Math.min(1, input[i]));
+        pcm[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+        peak = Math.max(peak, Math.abs(v));
+      }
+      ws.send(pcm.buffer);
+      $("liveLevel").textContent = "daraja " + "▁▂▃▄▅▆▇█"[Math.min(7, Math.floor(peak * 12))];
+    };
+
+    source.connect(node);
+    // Chiqishga ulanmasa ScriptProcessor ba'zi brauzerlarda ishlamaydi;
+    // ovoz qaytmasligi uchun nol kuchaytirgich orqali.
+    const mute = ctx.createGain();
+    mute.gain.value = 0;
+    node.connect(mute);
+    mute.connect(ctx.destination);
+
+    $("btnLiveStart").disabled = true;
+    $("btnLiveStop").disabled = false;
+  }
+
+  function liveStopSending() {
+    if (liveSocket && liveSocket.readyState === WebSocket.OPEN) {
+      liveSocket.send(JSON.stringify({ type: "stop" }));
+      liveSay("stop yuborildi, done kutilmoqda…");
+    }
+    if (liveNode) { liveNode.onaudioprocess = null; }
+    if (liveStream) liveStream.getTracks().forEach((t) => t.stop());
+    $("btnLiveStop").disabled = true;
+  }
+
+  function liveCleanup() {
+    if (liveNode) { try { liveNode.disconnect(); } catch {} liveNode = null; }
+    if (liveAudio) { try { liveAudio.close(); } catch {} liveAudio = null; }
+    if (liveStream) { liveStream.getTracks().forEach((t) => t.stop()); liveStream = null; }
+    liveSocket = null;
+    $("btnLiveStart").disabled = false;
+    $("btnLiveStop").disabled = true;
+    $("liveLevel").textContent = "";
+  }
+
+  $("btnLiveStart").addEventListener("click", () => liveStart().catch((e) => liveSay(String(e), "err")));
+  $("btnLiveStop").addEventListener("click", liveStopSending);
 
   // ------------------------------------------------------------ usage
   on("btnUsage", async () => {
