@@ -33,6 +33,7 @@ from app.models.oauth import OAuthAccount, OAuthProviderName
 from app.models.otp import OtpCode, OtpPurpose
 from app.models.price_book import MODEL_KEY_ANY, Price, PriceBookVersion
 from app.models.service_api_key import ServiceApiKey
+from app.models.stt_transcription import SttTranscription
 from app.models.topup import Payment, Topup
 from app.models.tts_job import TtsBatchJob
 from app.models.tts_recording import TtsRecording
@@ -66,6 +67,7 @@ __all__ = [
     "ServiceApiKey",
     "SessionAction",
     "SessionEndReason",
+    "SttTranscription",
     "Topup",
     "TopupProvider",
     "TopupStatus",

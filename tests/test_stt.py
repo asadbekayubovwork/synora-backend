@@ -24,6 +24,7 @@ each, CEIL. So anything from one millisecond to sixty seconds costs 1.200000.
 
 from __future__ import annotations
 
+import hashlib
 import struct
 
 import httpx
@@ -33,8 +34,9 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.models.ai_session import AiSession
 from app.models.billing_enums import AiSessionStatus, BillingService, SessionEndReason
+from app.models.stt_transcription import SttTranscription
 from app.models.user import User
-from app.services.ai import stt_client, stt_service
+from app.services.ai import recording_store, stt_client, stt_service
 from tests.conftest import auth, fund, register_and_verify
 
 CREDIT = 1_000_000
@@ -92,10 +94,26 @@ class FakeTranscriber:
 
 
 @pytest.fixture
-async def upstream(monkeypatch):
+def kept(monkeypatch, tmp_path):
+    """Keeping on, pointed at a tmp directory.
+
+    The default is `data/recordings`, and a suite that wrote there would leave
+    the developer's own store full of silence.
+    """
+    monkeypatch.setattr(settings, "recordings_enabled", True)
+    monkeypatch.setattr(settings, "recordings_dir", str(tmp_path / "recordings"))
+
+
+@pytest.fixture
+async def upstream(monkeypatch, tmp_path):
     box = FakeTranscriber()
     monkeypatch.setattr(settings, "stt_base_url", "http://stt.test")
     monkeypatch.setattr(settings, "stt_api_key", "test-token")
+    # Off unless a test asks for it with `kept`, so the billing cases below are
+    # not also exercising the file store — and so none of them writes to the
+    # real `data/recordings`.
+    monkeypatch.setattr(settings, "recordings_enabled", False)
+    monkeypatch.setattr(settings, "recordings_dir", str(tmp_path / "recordings"))
     monkeypatch.setattr(
         stt_client,
         "build_client",
@@ -471,3 +489,180 @@ async def test_two_calls_without_a_key_are_two_calls(
 
     after = await balance(client, token)
     assert after["available_micros"] == 20 * CREDIT - 2 * MINUTE_MICROS
+
+
+# --- what is kept -----------------------------------------------------------
+
+
+async def test_a_transcription_is_kept_with_the_audio_that_produced_it(
+    client, session, price_book, upstream, kept
+):
+    token = await funded(client, session, "keeper@example.com")
+    upstream.text = "Bugun havo juda yaxshi."
+    audio = wav(2_000)
+
+    response = await post(client, token, audio)
+    assert response.status_code == 200
+
+    rows = (await client.get("/stt/transcriptions", headers=auth(token))).json()[
+        "transcriptions"
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["text"] == "Bugun havo juda yaxshi."
+    assert row["language"] == "uz"
+    assert row["audio_bytes"] == len(audio)
+    assert row["filename"] == "clip.wav"
+    assert row["sha256"] == hashlib.sha256(audio).hexdigest()
+    assert row["ai_session_id"] == response.json()["ai_session_id"]
+
+    played = await client.get(
+        f"/stt/transcriptions/{row['id']}/audio", headers=auth(token)
+    )
+    assert played.status_code == 200
+    assert played.content == audio
+
+
+async def test_a_refused_transcription_keeps_nothing(
+    client, session, price_book, upstream, kept
+):
+    token = await funded(client, session, "refused@example.com")
+    upstream.status = 400
+
+    await post(client, token, wav(2_000))
+
+    assert (await client.get("/stt/transcriptions", headers=auth(token))).json()[
+        "transcriptions"
+    ] == []
+    assert list(recording_store.root().rglob("*.wav")) == []
+
+
+async def test_keeping_can_be_switched_off(
+    client, session, price_book, upstream, kept, monkeypatch
+):
+    monkeypatch.setattr(settings, "recordings_enabled", False)
+    token = await funded(client, session, "optout@example.com")
+
+    response = await post(client, token, wav(2_000))
+
+    # The transcript still comes back; only the keepsake is gone.
+    assert response.status_code == 200
+    assert response.json()["text"]
+    assert (await client.get("/stt/transcriptions", headers=auth(token))).json()[
+        "transcriptions"
+    ] == []
+
+
+async def test_deleting_removes_the_row_and_the_audio(
+    client, session, price_book, upstream, kept
+):
+    token = await funded(client, session, "eraser@example.com")
+    await post(client, token, wav(2_000))
+    row = (await client.get("/stt/transcriptions", headers=auth(token))).json()[
+        "transcriptions"
+    ][0]
+
+    assert (
+        await client.delete(f"/stt/transcriptions/{row['id']}", headers=auth(token))
+    ).status_code == 200
+
+    assert (await client.get("/stt/transcriptions", headers=auth(token))).json()[
+        "transcriptions"
+    ] == []
+    assert list(recording_store.root().rglob("*.wav")) == []
+    # The charge is untouched: what was said is erased, not that it was paid for.
+    usage = (await client.get("/usage", headers=auth(token))).json()
+    assert usage["lines"][0]["quantity"] == 1_000
+
+
+async def test_another_accounts_transcription_is_a_404(
+    client, session, price_book, upstream, kept
+):
+    ali = await funded(client, session, "ali@example.com")
+    vali = await funded(client, session, "vali@example.com")
+    await post(client, ali, wav(2_000))
+    row = (await client.get("/stt/transcriptions", headers=auth(ali))).json()[
+        "transcriptions"
+    ][0]
+
+    for method, path in (
+        ("get", f"/stt/transcriptions/{row['id']}"),
+        ("get", f"/stt/transcriptions/{row['id']}/audio"),
+        ("delete", f"/stt/transcriptions/{row['id']}"),
+    ):
+        response = await getattr(client, method)(path, headers=auth(vali))
+        assert response.status_code == 404, (method, path)
+        assert response.json()["code"] == "transcription_not_found"
+
+
+async def test_a_synthesis_and_its_own_transcription_share_one_file(
+    client, session, price_book, upstream, kept
+):
+    """The case content addressing invites, across two tables.
+
+    Transcribing audio this account synthesised is the obvious way to exercise
+    both gateways — it is what the dev UI's "read the last synthesis" button
+    does — and the uploaded bytes are the produced bytes. So one file ends up
+    with a row in `tts_recordings` and a row in `stt_transcriptions`, and
+    neither delete may unlink it while the other still points at it.
+    """
+    from app.services.ai import tts_recording_service
+
+    token = await funded(client, session, "roundtrip@example.com")
+    audio = wav(2_000)
+
+    await post(client, token, audio)
+    transcription = (
+        await client.get("/stt/transcriptions", headers=auth(token))
+    ).json()["transcriptions"][0]
+
+    # The speech side's row for the same bytes. Written through the service
+    # rather than by synthesising here, because what is under test is two
+    # tables naming one key — not how the second one got there.
+    user = (
+        await session.execute(
+            select(User).where(User.email == "roundtrip@example.com")
+        )
+    ).scalar_one()
+    stored = (
+        await session.execute(
+            select(SttTranscription).where(SttTranscription.user_id == user.id)
+        )
+    ).scalar_one()
+    await tts_recording_service.save(
+        session,
+        user_id=user.id,
+        ai_session_id=stored.ai_session_id,
+        body="Bugun havo juda yaxshi.",
+        voice_id=None,
+        quality="balanced",
+        audio_format="wav",
+        sample_rate=16_000,
+        style=None,
+        characters=23,
+        audio_bytes=len(audio),
+        audio_ms=2_000,
+        storage_key=stored.storage_key,
+        sha256=stored.sha256,
+    )
+
+    recording = (await client.get("/tts/recordings", headers=auth(token))).json()[
+        "recordings"
+    ][0]
+    assert recording["sha256"] == transcription["sha256"]
+    assert len(list(recording_store.root().rglob("*.wav"))) == 1, "one file, two rows"
+
+    # Deleting the recording must not empty the transcription's audio.
+    await client.delete(f"/tts/recordings/{recording['id']}", headers=auth(token))
+
+    played = await client.get(
+        f"/stt/transcriptions/{transcription['id']}/audio", headers=auth(token)
+    )
+    assert played.status_code == 200
+    assert played.content == audio
+
+    # ...and once both rows are gone, so is the file.
+    await client.delete(
+        f"/stt/transcriptions/{transcription['id']}", headers=auth(token)
+    )
+    assert list(recording_store.root().rglob("*.wav")) == []

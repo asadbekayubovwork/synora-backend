@@ -128,6 +128,76 @@ that arrived.
 
 ---
 
+## Kept transcriptions
+
+Every charged transcription is kept: the transcript, and the audio that was
+uploaded.
+
+```bash
+curl "$API/stt/transcriptions?limit=25" -H "$A"
+```
+
+```json
+{
+  "ok": true,
+  "transcriptions": [
+    {
+      "id": "5a7c0e19-…",
+      "ai_session_id": "db0e0ef5-…",
+      "text": "Assalomu alaykum, bugun havo juda yaxshi.",
+      "language": "uz",
+      "audio_ms": 1280,
+      "infer_ms": 413,
+      "filename": "clip.wav",
+      "content_type": "audio/wav",
+      "audio_bytes": 169004,
+      "sha256": "9f2c…",
+      "created_at": "2026-09-11T06:12:44.031Z"
+    }
+  ],
+  "page": { "next_cursor": null, "has_more": false, "limit": 25 }
+}
+```
+
+The audio is a second request, and it costs nothing — the work was paid for
+when it happened:
+
+```bash
+curl "$API/stt/transcriptions/$ID/audio" -H "$A" -o uploaded.wav
+shasum -a 256 uploaded.wav      # equals the `sha256` field
+```
+
+### One file can belong to two records
+
+Audio is stored under the sha256 of its own bytes, so **transcribing something
+you synthesised here stores one file with a row in each table** — one in
+`tts_recordings`, one in `stt_transcriptions`. That is the ordinary result of
+using both gateways together, not a corner case.
+
+So neither delete unlinks a file on sight. Deleting a transcription removes the
+row and only removes the file once no record of either kind still names it:
+
+```bash
+curl -X DELETE "$API/stt/transcriptions/$ID" -H "$A"
+```
+
+Erasing what was transcribed does not erase that it was paid for —
+`usage_events`, the ledger and `GET /usage` are untouched.
+
+### What is not kept
+
+| Case | Why |
+| --- | --- |
+| The service refused the audio or the language | Nothing was produced and nothing was charged |
+| A retry under a spent `Idempotency-Key` | It never reached the model; the original is already here |
+| Anything at all while `RECORDINGS_ENABLED=false` | The deployment opted out |
+
+`RECORDINGS_ENABLED` is one switch over both gateways. What it keeps on this
+side is audio a *user* uploaded, which is a heavier thing than speech we
+produced — worth deciding deliberately rather than inheriting.
+
+---
+
 ## Errors
 
 Branch on `code`, never on the message text.
@@ -144,6 +214,8 @@ Branch on `code`, never on the message text.
 | `stt_unreachable` | 502 | Timeout, transport failure, redirect or upstream 5xx | Retry with backoff |
 | `stt_unreadable` | 502 | A 2xx we could not parse as a transcript | Retry once, then report it |
 | `stt_idempotency_spent` | 409 | This key has already been charged | Send a new key |
+| `transcription_not_found` | 404 | No such transcription, or it is not yours | Nothing. A 403 would confirm one exists |
+| `transcription_audio_missing` | 404 | The row is there, the file is not | Report it. A restore missed `RECORDINGS_DIR` |
 | `insufficient_balance` | 402 | The wallet cannot cover the hold | Top up by `shortfallMicros` |
 
 Note which 503s are worth retrying: only `stt_not_ready`, and it is the only
@@ -170,6 +242,7 @@ open a second session.
 | `STT_MAX_AUDIO_BYTES` | `26214400` | 25 MB |
 | `STT_MAX_AUDIO_SECONDS` | `600` | Past this, a caller wants a job rather than a request that hangs |
 | `STT_ASSUMED_BYTES_PER_SECOND` | `8000` | For the hold only, and only for compressed audio |
+| `RECORDINGS_ENABLED` / `RECORDINGS_DIR` | `true` / `data/recordings` | Keep the transcript and the uploaded audio. One switch over both gateways |
 
 Prices are not here. They live in the database, versioned, and are published
 through the admin API — see

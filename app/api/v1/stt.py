@@ -17,14 +17,29 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, File, Form, Header, Request, Response, UploadFile
+import uuid
+
+from fastapi import APIRouter, File, Form, Header, Path, Query, Request, Response, UploadFile
+from fastapi.responses import FileResponse
 
 from app.api.deps import CurrentUser, SessionDep
 from app.core.config import settings
-from app.core.exceptions import BadRequestError
+from app.core.exceptions import BadRequestError, NotFoundError
 from app.schemas.auth import ErrorResponse
-from app.schemas.stt import TranscriptionResponse, transcription_response
-from app.services.ai import stt_client, stt_service
+from app.schemas.common import Cursor, MessageResponse, PageInfo, clamp_limit, decode_cursor
+from app.schemas.stt import (
+    TranscriptionPageResponse,
+    TranscriptionRecordResponse,
+    TranscriptionResponse,
+    transcription_record_response,
+    transcription_response,
+)
+from app.services.ai import (
+    recording_store,
+    stt_client,
+    stt_service,
+    stt_transcription_service,
+)
 from app.services.billing.session_service import MAX_CLIENT_IDEMPOTENCY_KEY
 
 logger = logging.getLogger("synora.stt")
@@ -154,3 +169,159 @@ async def transcribe(
     # are for the client that wants the price without deserialising.
     response.headers.update(transcription.headers)
     return transcription_response(transcription)
+
+
+# --- kept transcriptions ----------------------------------------------------
+
+TranscriptionIdPath = Path(
+    description="A transcription id, as `GET /stt/transcriptions` returned it."
+)
+LimitQuery = Query(
+    default=None, ge=1, le=100, description="Rows per page. Defaults to 25, capped at 100."
+)
+CursorQuery = Query(
+    default=None, description="The `page.next_cursor` from the previous response."
+)
+
+RECORD_ERRORS: dict[int | str, dict] = {
+    401: {"model": ErrorResponse, "description": "Unauthorized"},
+    403: {"model": ErrorResponse, "description": "Forbidden"},
+    404: {"model": ErrorResponse, "description": "No such transcription"},
+    422: {"model": ErrorResponse, "description": "Validation error"},
+}
+
+
+@router.get(
+    "/transcriptions",
+    response_model=TranscriptionPageResponse,
+    responses=RECORD_ERRORS,
+    summary="Every transcription this account has kept",
+    description=(
+        "What was transcribed and what came back — newest first, "
+        "cursor-paginated exactly as `GET /tts/recordings` is.\n\n"
+        "**The audio is a separate request.** "
+        "`GET /stt/transcriptions/{id}/audio` returns the file that was "
+        "uploaded, byte for byte, and it costs nothing: the transcription was "
+        "paid for when it happened.\n\n"
+        "A transcription is kept when it was charged for. A call the service "
+        "refused — audio it could not decode, a language it does not serve — "
+        "charged nothing and is not here; nor is anything transcribed while "
+        "`RECORDINGS_ENABLED` was false.\n\n"
+        "**These rows do not expire**, and they hold audio the *user* "
+        "uploaded. `DELETE /stt/transcriptions/{id}` is how one is erased."
+    ),
+)
+async def transcriptions(
+    user: CurrentUser,
+    session: SessionDep,
+    limit: int | None = LimitQuery,
+    cursor: str | None = CursorQuery,
+) -> TranscriptionPageResponse:
+    page_size = clamp_limit(limit)
+    rows, has_more = await stt_transcription_service.page(
+        session, user_id=user.id, limit=page_size, position=decode_cursor(cursor)
+    )
+    next_cursor = (
+        Cursor(created_at=rows[-1].created_at, row_id=rows[-1].id).encode()
+        if has_more and rows
+        else None
+    )
+    return TranscriptionPageResponse(
+        transcriptions=[transcription_record_response(row) for row in rows],
+        page=PageInfo(next_cursor=next_cursor, has_more=has_more, limit=page_size),
+    )
+
+
+@router.get(
+    "/transcriptions/{transcription_id}",
+    response_model=TranscriptionRecordResponse,
+    responses=RECORD_ERRORS,
+    summary="One kept transcription",
+    description=(
+        "Somebody else's id is a `404` rather than a `403`, for the reason it "
+        "is everywhere else here: a 403 confirms the id exists."
+    ),
+)
+async def transcription(
+    user: CurrentUser,
+    session: SessionDep,
+    transcription_id: uuid.UUID = TranscriptionIdPath,
+) -> TranscriptionRecordResponse:
+    return transcription_record_response(
+        await stt_transcription_service.require_own(
+            session, user_id=user.id, transcription_id=transcription_id
+        )
+    )
+
+
+@router.get(
+    "/transcriptions/{transcription_id}/audio",
+    responses={
+        **RECORD_ERRORS,
+        200: {
+            "content": {"audio/wav": {}, "audio/mpeg": {}, "application/octet-stream": {}},
+            "description": "The audio exactly as it was uploaded.",
+        },
+    },
+    summary="The audio of a kept transcription",
+    description=(
+        "The bytes that were uploaded, verifiable against the `sha256` on the "
+        "record — the file is stored under that digest.\n\n"
+        "A `404` here with the transcription still listed means the row "
+        "survived and the file did not: a restore that missed "
+        "`RECORDINGS_DIR`, or a disk that was cleared. The row stays, because "
+        "it is still the record that the work happened."
+    ),
+)
+async def transcription_audio(
+    user: CurrentUser,
+    session: SessionDep,
+    transcription_id: uuid.UUID = TranscriptionIdPath,
+) -> FileResponse:
+    row = await stt_transcription_service.require_own(
+        session, user_id=user.id, transcription_id=transcription_id
+    )
+    path = recording_store.path_for(row.storage_key)
+    if path is None or not path.exists():
+        logger.warning(
+            "transcription_file_missing id=%s key=%s", row.id, row.storage_key
+        )
+        raise NotFoundError(
+            "The audio for this transcription is no longer on disk.",
+            code="transcription_audio_missing",
+        )
+    return FileResponse(
+        path,
+        # What the client said it was sending. Unverified — nothing on our side
+        # decoded the file — which is why it falls back to a type that promises
+        # nothing rather than to a guess.
+        media_type=row.content_type or "application/octet-stream",
+        filename=row.filename or f"synora-{row.id}",
+    )
+
+
+@router.delete(
+    "/transcriptions/{transcription_id}",
+    response_model=MessageResponse,
+    responses=RECORD_ERRORS,
+    summary="Erase one kept transcription",
+    description=(
+        "Removes the row and, once nothing else names the same audio, the "
+        "file.\n\n"
+        "**The file can be shared with a synthesis.** Audio is stored under "
+        "the sha256 of its own bytes, so transcribing something this account "
+        "synthesised is one file with a row in each table. Deleting here never "
+        "empties the recording's playback, and vice versa.\n\n"
+        "Nothing about the charge changes: the ledger and `GET /usage` are the "
+        "record of what was billed, and this route does not touch them."
+    ),
+)
+async def delete_transcription(
+    user: CurrentUser,
+    session: SessionDep,
+    transcription_id: uuid.UUID = TranscriptionIdPath,
+) -> MessageResponse:
+    await stt_transcription_service.delete(
+        session, user_id=user.id, transcription_id=transcription_id
+    )
+    return MessageResponse(message="Transcription deleted.")

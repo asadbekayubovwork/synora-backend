@@ -65,11 +65,30 @@ logger = logging.getLogger("synora.recordings")
 # point — a key is joined onto a filesystem root.
 KEY_PATTERN = re.compile(r"^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{64}\.[a-z0-9]{1,8}$")
 
-# `pcm` is raw samples with no container, and a `.pcm` file is only playable by
-# something that already knows the rate. Stored under its own extension anyway:
-# the row carries `sample_rate`, and renaming it `.wav` would be a lie that a
-# player would then act on.
-EXTENSIONS = {"mp3": "mp3", "wav": "wav", "opus": "opus", "pcm": "pcm"}
+# A whitelist rather than a sanitiser, because this value becomes the tail of a
+# filename. The first four are what `/tts/speech` produces; the rest are what
+# arrives at `/stt/transcribe`, where the extension comes off a client-supplied
+# filename and is therefore untrusted. Anything unrecognised is stored as
+# `.bin`, which is honest: nothing on our side decoded the file.
+#
+# `pcm` is raw samples with no container and is only playable by something that
+# already knows the rate. Stored under its own extension anyway — the row
+# carries `sample_rate`, and renaming it `.wav` would be a lie a player acts on.
+EXTENSIONS = {
+    "mp3": "mp3",
+    "wav": "wav",
+    "opus": "opus",
+    "pcm": "pcm",
+    "m4a": "m4a",
+    "mp4": "mp4",
+    "aac": "aac",
+    "flac": "flac",
+    "ogg": "ogg",
+    "oga": "ogg",
+    "webm": "webm",
+    "amr": "amr",
+    "3gp": "3gp",
+}
 
 _INCOMING = "incoming"
 

@@ -83,6 +83,9 @@ All under `/api/v1`.
 | `GET`  | `/tts/recordings/{id}/audio` | Play it back. Costs nothing |
 | `DELETE` | `/tts/recordings/{id}` | Erase one |
 | `POST` | `/stt/transcribe` | Transcribe an upload. Metered by duration |
+| `GET`  | `/stt/transcriptions` | Every transcription this account has kept |
+| `GET`  | `/stt/transcriptions/{id}/audio` | The audio that was uploaded |
+| `DELETE` | `/stt/transcriptions/{id}` | Erase one |
 | `GET`  | `/usage` | Your own consumption, by service and metric |
 | `GET`  | `/admin/wallets/{user_id}` | Any user's balance (superuser) |
 | `POST` | `/admin/wallets/{user_id}/credits` | Grant credit by hand (superuser) |
@@ -622,6 +625,18 @@ first byte charges nothing and releases the hold, an upstream that over-reports
 is clamped and flagged `disputed`, and a spent `Idempotency-Key` is a `409`
 rather than a second charge — there is no transcript stored to hand back.
 
+Kept the same way synthesis is, and under the same switch: the transcript and
+the uploaded audio go to `stt_transcriptions` and a file under
+`RECORDINGS_DIR`, listed by `GET /stt/transcriptions` and erasable one at a
+time. Audio is addressed by its own sha256, so transcribing something this
+account synthesised is **one file with a row in each table** — which is why
+neither delete unlinks on sight and `app/services/ai/stored_audio.py` counts
+across both.
+
+Worth being deliberate about: what is kept here is audio a *user* uploaded — a
+meeting, a call, a voice note — rather than speech we produced.
+`RECORDINGS_ENABLED=false` turns off both.
+
 The whole contract, with the error table: [docs/STT.md](docs/STT.md).
 
 ## The Nuxt frontend
@@ -832,6 +847,7 @@ app/
 │   ├── ai/
 │   │   ├── recording_store.py   Audio files, content-addressed. No rows
 │   │   ├── tts_recording_service.py  Rows for delivered audio, and ownership
+│   │   ├── stored_audio.py      Is any table still using this file?
 │   │   ├── stt_client.py        The transcription box. X-Token, multipart
 │   │   ├── stt_service.py       Estimate, hold, transcribe, settle
 │   │   ├── tts_client.py        The speech box, and nothing else. No money

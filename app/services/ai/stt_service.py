@@ -67,7 +67,7 @@ from app.core.money import format_credits
 from app.db.session import SessionLocal
 from app.models.billing_enums import BillingService, SessionEndReason, UsageMetric
 from app.models.user import User
-from app.services.ai import stt_client
+from app.services.ai import recording_store, stt_client, stt_transcription_service
 from app.services.billing import session_service
 
 logger = logging.getLogger("synora.stt")
@@ -283,6 +283,22 @@ async def transcribe(
         )
 
     metrics.record_transcription(audio_seconds=audio_ms / 1000)
+
+    # After the settlement and on a session of its own, exactly as the speech
+    # side keeps its recordings: a keepsake that cannot be written must not be
+    # able to roll back a charge that has already committed. Guarded end to end
+    # — `_keep` never raises — because by this point the caller has paid and
+    # the transcript is in hand.
+    await _keep(
+        ticket,
+        audio=audio,
+        filename=filename,
+        content_type=content_type,
+        language=str(payload.get("language") or language),
+        body=str(payload.get("text") or ""),
+        audio_ms=audio_ms,
+        infer_seconds=_float_or_none(payload.get("infer_seconds")),
+    )
     logger.info(
         "stt_transcribed session=%s user=%s bytes=%d estimated_ms=%d billed_ms=%d "
         "charge=%s clamped=%s",
@@ -304,6 +320,69 @@ async def transcribe(
         infer_seconds=_float_or_none(payload.get("infer_seconds")),
         replayed=False,
     )
+
+
+async def _keep(
+    ticket,
+    *,
+    audio: bytes,
+    filename: str,
+    content_type: str | None,
+    language: str,
+    body: str,
+    audio_ms: int,
+    infer_seconds: float | None,
+) -> None:
+    """Store the upload and its transcript. Never raises.
+
+    The bytes are already in memory — they had to be, to be uploaded — so this
+    writes them once rather than streaming, which is the one place it differs
+    from `tts_service`'s capture. The store is the same one and the file is
+    addressed the same way, which is what lets a synthesis and its own
+    transcription share a single file on disk.
+    """
+    try:
+        writer = await recording_store.begin()
+        if writer is None:
+            return
+        writer.write(audio)
+        committed = await writer.commit(audio_format=_extension_of(filename))
+        if committed is None:
+            return
+        storage_key, digest = committed
+        async with SessionLocal() as own:
+            await stt_transcription_service.save(
+                own,
+                user_id=ticket.user_id,
+                ai_session_id=ticket.ai_session_id,
+                body=body,
+                language=language,
+                audio_ms=audio_ms,
+                infer_ms=int((infer_seconds or 0) * 1000),
+                filename=filename[:255],
+                content_type=content_type[:128] if content_type else None,
+                audio_bytes=len(audio),
+                storage_key=storage_key,
+                sha256=digest,
+            )
+    except Exception:  # noqa: BLE001 - never worth the transcript already paid for
+        logger.exception(
+            "transcription_keep_failed session=%s bytes=%d",
+            ticket.ai_session_id,
+            len(audio),
+        )
+
+
+def _extension_of(filename: str) -> str:
+    """The upload's own extension, for the stored file's name.
+
+    Taken from the client's filename rather than sniffed, and passed through
+    `recording_store`'s whitelist — an unknown one is stored as `.bin`, which
+    is honest about the fact that nothing here decoded the file. The extension
+    never becomes part of a path we build: the path is the digest.
+    """
+    _, _, suffix = filename.rpartition(".")
+    return suffix.lower() if suffix and suffix != filename else "bin"
 
 
 async def _release(

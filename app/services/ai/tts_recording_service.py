@@ -15,18 +15,19 @@ the worst outcome this function is allowed to produce is a log line and a file
 nobody has a row for. Both are recoverable by hand; a traceback out of that
 `finally` is not.
 
-## `delete` counts before it unlinks
+## `delete` counts before it unlinks, and not only here
 
 Files are content-addressed, so two rows naming the same key is the ordinary
 case rather than a corner one — the same text in the same voice produces the
-same bytes. The row goes first, then the remaining rows for that key are
-counted in the same transaction, and only a count of zero unlinks the file.
-Unlinking on sight is how one user's delete silently empties another user's
-recording, and the symptom would be a 200 with a zero-byte body weeks later.
+same bytes. Unlinking on sight is how one user's delete silently empties
+another user's recording, and the symptom would be a 200 with a zero-byte body
+weeks later.
 
-The unlink is deliberately *after* the commit. Inside it, a rollback would
-leave a row pointing at a file that no longer exists; after it, the worst case
-is a file with no rows, which is disk and not a lie.
+The counting is `stored_audio.release_key`'s, because the rows are not all in
+this table: an `/stt/transcribe` upload of audio we synthesised names the same
+key from `stt_transcriptions`. It runs after the commit — inside it, a rollback
+would leave a row pointing at a file that is gone; after it, the worst case is
+a file with no rows, which is disk and not a lie.
 """
 
 from __future__ import annotations
@@ -34,13 +35,13 @@ from __future__ import annotations
 import logging
 import uuid
 
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError
 from app.models.tts_recording import TtsRecording
 from app.schemas.common import Cursor
-from app.services.ai import recording_store
+from app.services.ai import stored_audio
 
 logger = logging.getLogger("synora.recordings")
 
@@ -159,34 +160,12 @@ async def delete(
     storage_key = recording.storage_key
 
     await session.delete(recording)
-    await session.flush()
-
-    # In the same transaction as the delete, so the count cannot miss a row
-    # that a concurrent synthesis is in the middle of inserting under this key.
-    remaining = (
-        await session.execute(
-            select(func.count())
-            .select_from(TtsRecording)
-            .where(TtsRecording.storage_key == storage_key)
-        )
-    ).scalar_one()
     await session.commit()
 
-    if remaining:
-        # Somebody else — or this same user on another row — synthesised the
-        # identical text in the identical voice. Their audio is these bytes.
-        logger.info(
-            "recording_deleted id=%s key=%s kept (%d row(s) remain)",
-            recording_id,
-            storage_key,
-            remaining,
-        )
-        return
-
-    unlinked = await recording_store.delete(storage_key)
-    logger.info(
-        "recording_deleted id=%s key=%s file=%s",
-        recording_id,
-        storage_key,
-        "unlinked" if unlinked else "already gone",
-    )
+    # Counted across every table that stores audio, not just this one: a
+    # synthesis that was then uploaded to `/stt/transcribe` leaves a
+    # `stt_transcriptions` row naming these same bytes, and unlinking on the
+    # strength of this table alone would empty that transcription's playback.
+    # `stored_audio` is where that argument lives.
+    await stored_audio.release_key(session, storage_key, owner="recording")
+    logger.info("recording_deleted id=%s key=%s", recording_id, storage_key)

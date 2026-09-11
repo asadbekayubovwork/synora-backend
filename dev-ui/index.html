@@ -318,7 +318,11 @@ bob2 | Ikkinchi bob.</textarea>
           nomlangan faylda. Upstream birinchi baytdan oldin rad etgan chaqiruv,
           sarflangan idempotency kaliti bilan qaytarilgan takror, va
           <code>RECORDINGS_ENABLED=false</code> paytidagi hamma narsa —
-          ataylab saqlanmaydi.
+          ataylab saqlanmaydi.<br><br>
+          Yuklangan audio va transkript ham saqlanadi. Fayl o'z sha256'i bilan
+          nomlangani uchun <b>sintez qilingan audioni shu yerga yuborsangiz,
+          disk bitta fayl saqlaydi</b> — Yozuvlar va bu ro'yxat ikkalasi
+          o'shani ko'rsatadi, va bittasini o'chirish ikkinchisini bo'shatmaydi.
         </div>
       </div>
     </div>
@@ -338,6 +342,11 @@ bob2 | Ikkinchi bob.</textarea>
           <button id="btnTranscribe" class="primary">matnga aylantirish</button>
           <button id="btnSttFromLast">oxirgi sintezni o'qish</button>
         </div>
+
+        <div class="row">
+          <button id="btnTranscriptions">saqlanganlarni yuklash</button>
+        </div>
+        <div id="transcriptionList"></div>
 
         <div class="card" id="sttCard" style="display:none">
           <h3>Transkript</h3>
@@ -1019,7 +1028,49 @@ bob2 | Ikkinchi bob.</textarea>
         `<span class="pill ${ok ? "ok" : "bad"}">${ok ? "mos" : "mos emas"}</span> · ` +
         `reserved ${after.reserved} <span class="pill ${after.reserved_micros ? "bad" : "ok"}">` +
         `${after.reserved_micros ? "qaytmadi" : "qaytdi"}</span></span>`;
+    loadTranscriptions().catch(() => {});
   }
+
+  async function loadTranscriptions() {
+    const data = await api("GET", "/stt/transcriptions", { query: { limit: 10 } });
+    const rows = data.transcriptions.map((r) => `
+      <div class="card" data-tr="${esc(r.id)}">
+        <div style="font-size:14px;line-height:1.6;margin-bottom:8px">${esc(r.text || "(nutq topilmadi)")}</div>
+        <div class="kv">
+          <span>fayl</span><span>${esc(r.filename)} · ${esc(r.content_type)} · ${r.audio_bytes} bayt</span>
+          <span>til / uzunlik</span><span>${esc(r.language)} · ${r.audio_ms} ms · model ${r.infer_ms} ms</span>
+          <span>sha256</span><span>${esc(r.sha256.slice(0, 16))}…</span>
+          <span>vaqt</span><span>${esc(r.created_at.replace("T", " ").slice(0, 19))}</span>
+        </div>
+        <div class="row">
+          <button data-play-tr="${esc(r.id)}">audioni eshitish</button>
+          <button data-del-tr="${esc(r.id)}" class="danger">o'chirish</button>
+        </div>
+        <audio controls style="display:none"></audio>
+      </div>`).join("");
+    $("transcriptionList").innerHTML = rows || `<div class="hint">Hali saqlangan transkript yo'q.</div>`;
+    $("transcriptionList").querySelectorAll("button[data-play-tr]").forEach((b) => {
+      b.addEventListener("click", async () => {
+        const card = b.closest("[data-tr]");
+        const url = store.base.replace(/\/$/, "") + "/stt/transcriptions/" + b.dataset.playTr + "/audio";
+        const res = await fetch(url, { headers: { Authorization: "Bearer " + store.access } });
+        if (!res.ok) { toast("Audio topilmadi (" + res.status + ")", true); return; }
+        const blob = await res.blob();
+        const player = card.querySelector("audio");
+        player.src = URL.createObjectURL(blob);
+        player.style.display = "";
+        player.play().catch(() => {});
+      });
+    });
+    $("transcriptionList").querySelectorAll("button[data-del-tr]").forEach((b) => {
+      b.addEventListener("click", async () => {
+        await api("DELETE", "/stt/transcriptions/" + b.dataset.delTr).catch(() => {});
+        loadTranscriptions().catch(() => {});
+      });
+    });
+  }
+
+  on("btnTranscriptions", loadTranscriptions);
 
   on("btnTranscribe", async () => {
     const file = $("sttFile").files[0];
