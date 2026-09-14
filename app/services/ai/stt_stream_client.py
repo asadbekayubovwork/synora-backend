@@ -160,17 +160,31 @@ async def connect(*, language: str, sample_rate: int) -> AsyncIterator[UpstreamS
         )
     except InvalidStatus as error:
         status = error.response.status_code
-        metrics.record_stt_upstream_error(code=_code_for(status))
+        metrics.observe_stt_upstream(
+            operation="handshake", seconds=time.perf_counter() - started
+        )
+        metrics.record_stt_upstream_error(
+            operation="handshake", code=_code_for(status)
+        )
         raise _handshake_error(status) from error
     except (WebSocketException, OSError, TimeoutError) as error:
-        metrics.record_stt_upstream_error(code="stt_unreachable")
+        # A handshake that hit `open_timeout` took the full ten seconds and is
+        # the one a caller felt; it belongs in the histogram beside the fast ones.
+        metrics.observe_stt_upstream(
+            operation="handshake", seconds=time.perf_counter() - started
+        )
+        metrics.record_stt_upstream_error(
+            operation="handshake", code="stt_unreachable"
+        )
         logger.warning("stt_stream_connect_failed: %s", error)
         raise BadGatewayError(
             "Could not reach the transcription service. Please try again.",
             code="stt_unreachable",
         ) from error
 
-    metrics.observe_stt_upstream(seconds=time.perf_counter() - started)
+    metrics.observe_stt_upstream(
+        operation="handshake", seconds=time.perf_counter() - started
+    )
     stream = UpstreamStream(socket)
     try:
         await stream.start(language=language, sample_rate=sample_rate)

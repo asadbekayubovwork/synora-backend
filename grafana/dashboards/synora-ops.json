@@ -1788,13 +1788,13 @@
     },
     {
       "type": "timeseries",
-      "title": "Transcription latency (p50 / p95)",
+      "title": "Batch transcription latency (p50 / p95)",
       "id": 30,
       "datasource": {
         "type": "prometheus",
         "uid": "synora-prom"
       },
-      "description": "Upload plus inference, from our side of the socket. A cold model load lands in here too, which is what `stt_not_ready` is about.",
+      "description": "Upload plus inference for `POST /stt/transcribe`, from our side of the socket. A cold model load lands in here too, which is what `stt_not_ready` is about. Realtime sessions are a separate panel \u2014 they shared this histogram until `operation` landed, and a handshake in among these would sit under every bucket edge and drag both quantiles down.",
       "gridPos": {
         "h": 7,
         "w": 8,
@@ -1808,7 +1808,7 @@
             "uid": "synora-prom"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(synora_stt_upstream_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(synora_stt_upstream_seconds_bucket{operation=\"batch\"}[5m])))",
           "legendFormat": "p50",
           "range": true,
           "instant": false,
@@ -1820,7 +1820,7 @@
             "uid": "synora-prom"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(synora_stt_upstream_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(synora_stt_upstream_seconds_bucket{operation=\"batch\"}[5m])))",
           "legendFormat": "p95",
           "range": true,
           "instant": false,
@@ -1867,7 +1867,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Transcription failures per minute, by code",
+      "title": "Transcription failures per minute, by operation and code",
       "id": 31,
       "datasource": {
         "type": "prometheus",
@@ -1887,8 +1887,8 @@
             "uid": "synora-prom"
           },
           "editorMode": "code",
-          "expr": "sum by (code) (rate(synora_stt_upstream_errors_total[5m]) * 60)",
-          "legendFormat": "{{code}}",
+          "expr": "sum by (operation, code) (rate(synora_stt_upstream_errors_total[5m]) * 60)",
+          "legendFormat": "{{operation}} \u00b7 {{code}}",
           "range": true,
           "instant": false,
           "refId": "A"
@@ -2124,6 +2124,121 @@
           "unit": "short",
           "min": 0,
           "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Realtime latency \u2014 first transcript, inference, handshake",
+      "id": 35,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "`first transcript` is socket open to the first segment carrying text, so it contains the hold, the handshake and however long the speaker took to pause \u2014 VAD closes a segment on the pause. `segment infer` is upstream's own clock on every `final` and is the half with no client in it: when first transcript climbs and infer does not, the caller is talking, not waiting.",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 78
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(synora_stt_stream_first_transcript_seconds_bucket[5m])))",
+          "legendFormat": "first transcript p50",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(synora_stt_stream_first_transcript_seconds_bucket[5m])))",
+          "legendFormat": "first transcript p95",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(synora_stt_segment_infer_seconds_bucket[5m])))",
+          "legendFormat": "segment infer p50",
+          "range": true,
+          "instant": false,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(synora_stt_segment_infer_seconds_bucket[5m])))",
+          "legendFormat": "segment infer p95",
+          "range": true,
+          "instant": false,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(synora_stt_upstream_seconds_bucket{operation=\"handshake\"}[5m])))",
+          "legendFormat": "handshake p95",
+          "range": true,
+          "instant": false,
+          "refId": "E"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "decimals": 3,
           "custom": {
             "drawStyle": "line",
             "lineWidth": 1,

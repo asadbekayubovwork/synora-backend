@@ -238,23 +238,32 @@ async def transcribe(
             headers={"Accept": "application/json"},
         )
     except httpx.HTTPError as exc:
+        # Timed even though it failed, and timed first. A read timeout is the
+        # slowest thing this client can do — five minutes, by default — and
+        # counting it only as an error is what let the histogram report a
+        # healthy p99 while callers sat through exactly that.
+        metrics.observe_stt_upstream(
+            operation="batch", seconds=time.perf_counter() - started
+        )
         error = _unreachable(exc)
-        metrics.record_stt_upstream_error(code=error.code)
+        metrics.record_stt_upstream_error(operation="batch", code=error.code)
         raise error from exc
 
     # Timed before the status is judged, so a slow refusal is still measured —
     # a box taking nine seconds to answer 503 is the interesting case.
-    metrics.observe_stt_upstream(seconds=time.perf_counter() - started)
+    metrics.observe_stt_upstream(
+        operation="batch", seconds=time.perf_counter() - started
+    )
     try:
         _raise_for_upstream(response)
     except AppError as error:
-        metrics.record_stt_upstream_error(code=error.code)
+        metrics.record_stt_upstream_error(operation="batch", code=error.code)
         raise
 
     try:
         payload = response.json()
     except ValueError as exc:
-        metrics.record_stt_upstream_error(code="stt_unreadable")
+        metrics.record_stt_upstream_error(operation="batch", code="stt_unreadable")
         raise BadGatewayError(
             "The transcription service sent a response we could not read.",
             code="stt_unreadable",
@@ -264,7 +273,7 @@ async def transcribe(
         # A 2xx in the wrong shape is an upstream failure, not a transcript.
         # Checked here rather than in the schema builder so the route never has
         # to wonder whether `text` is a string or missing entirely.
-        metrics.record_stt_upstream_error(code="stt_unreadable")
+        metrics.record_stt_upstream_error(operation="batch", code="stt_unreadable")
         raise BadGatewayError(
             "The transcription service sent a response we could not read.",
             code="stt_unreadable",

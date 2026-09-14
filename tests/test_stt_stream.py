@@ -485,3 +485,38 @@ async def test_the_done_message_carries_the_bill(session, price_book, upstream):
     assert message["price_micros"] == outcome.price_micros
     assert message["price"] == "1.400000"  # one audio minute + the connection
     assert message["ai_session_id"] == str(outcome.ai_session_id)
+
+
+async def test_the_first_transcript_and_upstreams_own_clock_are_measured(
+    session, price_book, upstream
+):
+    """Two numbers nothing recorded before, on the path that had no latency
+    metric at all.
+
+    `infer_seconds` is the interesting one: upstream has been sending it on
+    every `final` since this protocol existed, the batch path has always
+    persisted it, and the stream path read straight past it. It is also the
+    only timing here with no network and no microphone in it, which makes it
+    the one number that can say the model got slower rather than the caller
+    got chattier.
+    """
+    from app.core import metrics
+
+    def count(name: str) -> float:
+        return metrics.REGISTRY.get_sample_value(f"{name}_count") or 0.0
+
+    first_before = count("synora_stt_stream_first_transcript_seconds")
+    infer_before = count("synora_stt_segment_infer_seconds")
+
+    # Two segments, so the per-session number and the per-segment one can be
+    # told apart: a first-transcript observed twice would be a bug that a
+    # single-segment session hides.
+    upstream(final(0, 2.0), final(1, 2.0), DONE)
+    user = await a_user(session)
+
+    await stt_stream_service.run(
+        FakeClient(audio(), audio(), stop()), user, language="uz", sample_rate=16_000
+    )
+
+    assert count("synora_stt_stream_first_transcript_seconds") == first_before + 1
+    assert count("synora_stt_segment_infer_seconds") == infer_before + 2

@@ -177,14 +177,28 @@ upstream_errors = Counter(
 
 stt_upstream_seconds = Histogram(
     "synora_stt_upstream_seconds",
-    "Time the transcription service took to answer, upload included.",
-    buckets=(0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0),
+    "Time the transcription service took to answer, by operation. `batch` is "
+    "one upload transcribed, upload included, and runs to minutes; "
+    "`handshake` is opening a realtime socket and is milliseconds. They were "
+    "pooled here until the label landed, which put every handshake in the "
+    "first bucket and pulled the batch quantiles down with them.",
+    ("operation",),
+    # Spans both populations, which is what one histogram for two operations
+    # costs. The low edges exist for `handshake` alone — without them a healthy
+    # socket open is indistinguishable from a slow one — and everything from
+    # 5.0 up is there for `batch`, whose read timeout is 300.
+    buckets=(
+        0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0,
+        5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
+    ),
     registry=REGISTRY,
 )
 stt_upstream_errors = Counter(
     "synora_stt_upstream_errors_total",
-    "Transcription failures by the code we mapped them to, not by status.",
-    ("code",),
+    "Transcription failures by the code we mapped them to, not by status. "
+    "Labelled by operation for the same reason the histogram is: a refused "
+    "handshake and a refused upload are different outages.",
+    ("operation", "code"),
     registry=REGISTRY,
 )
 stt_stream_sessions = Counter(
@@ -204,6 +218,26 @@ stt_stream_seconds = Counter(
 stt_stream_segments = Counter(
     "synora_stt_stream_segments_total",
     "Transcript segments VAD closed and we relayed.",
+    registry=REGISTRY,
+)
+stt_stream_first_transcript_seconds = Histogram(
+    "synora_stt_stream_first_transcript_seconds",
+    "Socket open to the first transcript segment. Includes the credit hold, "
+    "the upstream handshake, and however long the speaker took to say "
+    "something and then stop — VAD closes a segment on the pause, so a slow "
+    "number here can mean a slow model or a thoughtful caller. It is the "
+    "experience a client reports; `stt_segment_infer_seconds` is the half of "
+    "it we can hold upstream to.",
+    buckets=(0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 30.0),
+    registry=REGISTRY,
+)
+stt_segment_infer_seconds = Histogram(
+    "synora_stt_segment_infer_seconds",
+    "What upstream says it spent transcribing one segment, read off the "
+    "`infer_seconds` it already sends on every `final`. Its number rather "
+    "than ours, and the only timing here with no network and no microphone "
+    "in it.",
+    buckets=(0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 2.0, 5.0),
     registry=REGISTRY,
 )
 stt_streams_inflight = Gauge(
@@ -395,12 +429,22 @@ def record_upstream_error(*, operation: str, code: str) -> None:
     upstream_errors.labels(operation=operation, code=code).inc()
 
 
-def observe_stt_upstream(*, seconds: float) -> None:
-    stt_upstream_seconds.observe(seconds)
+def observe_stt_upstream(*, operation: str, seconds: float) -> None:
+    """One upstream call timed. `operation` is `batch` or `handshake`."""
+    stt_upstream_seconds.labels(operation=operation).observe(seconds)
 
 
-def record_stt_upstream_error(*, code: str) -> None:
-    stt_upstream_errors.labels(code=code).inc()
+def record_stt_upstream_error(*, operation: str, code: str) -> None:
+    stt_upstream_errors.labels(operation=operation, code=code).inc()
+
+
+def observe_stt_first_transcript(*, seconds: float) -> None:
+    """Once per realtime session, on the first segment that carries text."""
+    stt_stream_first_transcript_seconds.observe(seconds)
+
+
+def observe_stt_segment_infer(*, seconds: float) -> None:
+    stt_segment_infer_seconds.observe(seconds)
 
 
 def record_stream_session(

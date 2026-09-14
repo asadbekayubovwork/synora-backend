@@ -325,6 +325,18 @@ async def _relay(
             kind = event.get("type")
             if kind == "final":
                 outcome.segments += 1
+                if outcome.segments == 1:
+                    # Once a session, on the first segment carrying text. From
+                    # `started`, so the hold and the handshake are inside it:
+                    # this is what the caller waited, not what upstream spent.
+                    metrics.observe_stt_first_transcript(
+                        seconds=time.monotonic() - started
+                    )
+                # Upstream's own clock, which it has been sending on every
+                # `final` since this protocol existed and nothing has ever read.
+                infer_seconds = float(event.get("infer_seconds") or 0)
+                if infer_seconds > 0:
+                    metrics.observe_stt_segment_infer(seconds=infer_seconds)
                 seconds = float(event.get("audio_seconds") or 0)
                 outcome.audio_ms += int(seconds * 1000)
                 outcome.texts.append(str(event.get("text") or ""))

@@ -725,3 +725,90 @@ async def test_a_synthesis_and_its_own_transcription_share_one_file(
         f"/stt/transcriptions/{transcription['id']}", headers=auth(token)
     )
     assert list(recording_store.root().rglob("*.wav")) == []
+
+
+async def test_a_transcription_is_filed_under_its_own_operation(
+    client, session, price_book, upstream
+):
+    """Why `operation` exists.
+
+    One histogram serves both this call and a realtime socket open. A batch
+    transcription runs to minutes and a handshake to milliseconds, so pooled
+    they described neither: every handshake sat under the lowest bucket edge
+    and pulled these quantiles down with it.
+    """
+    from app.core import metrics
+
+    def count(operation: str) -> float:
+        return (
+            metrics.REGISTRY.get_sample_value(
+                "synora_stt_upstream_seconds_count", {"operation": operation}
+            )
+            or 0.0
+        )
+
+    before, handshakes = count("batch"), count("handshake")
+    token = await funded(client, session, "labelled@example.com")
+
+    assert (await post(client, token, wav(1_000))).status_code == 200
+
+    assert count("batch") == before + 1
+    assert count("handshake") == handshakes
+
+
+async def test_a_timeout_is_timed_and_not_only_counted(
+    client, session, price_book, upstream, monkeypatch
+):
+    """The slowest thing this client can do used to leave no trace in the
+    histogram at all.
+
+    The error was counted and re-raised before the observation, so a read
+    timeout — five minutes, by default — was recorded as a failure and never
+    as a duration. The p99 stayed healthy precisely when callers were waiting
+    longest, which is the one time nobody should have to read the logs to find
+    out.
+    """
+    from app.core import metrics
+
+    def count() -> float:
+        return (
+            metrics.REGISTRY.get_sample_value(
+                "synora_stt_upstream_seconds_count", {"operation": "batch"}
+            )
+            or 0.0
+        )
+
+    async def times_out(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("took too long", request=request)
+
+    monkeypatch.setattr(
+        stt_client,
+        "build_client",
+        lambda: httpx.AsyncClient(
+            base_url="http://stt.test", transport=httpx.MockTransport(times_out)
+        ),
+    )
+    await stt_client.aclose_client()
+
+    before = count()
+    errors = (
+        metrics.REGISTRY.get_sample_value(
+            "synora_stt_upstream_errors_total",
+            {"operation": "batch", "code": "stt_unreachable"},
+        )
+        or 0.0
+    )
+    token = await funded(client, session, "slowbox@example.com")
+
+    response = await post(client, token, wav(1_000))
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "stt_unreachable"
+    assert count() == before + 1, "a timeout is a duration, not only a failure"
+    assert (
+        metrics.REGISTRY.get_sample_value(
+            "synora_stt_upstream_errors_total",
+            {"operation": "batch", "code": "stt_unreachable"},
+        )
+        == errors + 1
+    )
