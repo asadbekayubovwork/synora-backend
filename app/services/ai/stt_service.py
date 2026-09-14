@@ -93,6 +93,14 @@ EXPOSED_HEADERS: tuple[str, ...] = (
 # upstream's decoder afterwards either way.
 _RIFF = b"RIFF"
 _WAVE = b"WAVE"
+# A ceiling on the chunk walk below. Real files carry a handful — `fmt `,
+# maybe `LIST`/`INFO`, `fact`, then `data` — and a few dozen is already
+# exotic. What this bounds is the crafted case: a header full of zero-length
+# chunks advances eight bytes an iteration, which turns a 25 MB upload into
+# three million iterations on the event loop. Past the cap the file is
+# treated as un-parseable rather than refused, so it bills through the byte
+# estimate, which over-estimates and is clamped at settlement.
+_MAX_RIFF_CHUNKS = 256
 
 
 @dataclass(slots=True)
@@ -129,7 +137,9 @@ def wav_duration_ms(audio: bytes) -> int | None:
 
     byte_rate = 0
     offset = 12
-    while offset + 8 <= len(audio):
+    for _ in range(_MAX_RIFF_CHUNKS):
+        if offset + 8 > len(audio):
+            return None
         chunk_id = audio[offset : offset + 4]
         (size,) = struct.unpack_from("<I", audio, offset + 4)
         body = offset + 8
@@ -150,6 +160,15 @@ def wav_duration_ms(audio: bytes) -> int | None:
     return None
 
 
+def _estimate_from_bytes(audio: bytes) -> int:
+    """The over-estimate on its own, for callers that already know it is not a WAV.
+
+    Split out so the request path can skip a second `wav_duration_ms` walk it
+    has already paid for once and knows the answer to.
+    """
+    return math.ceil(len(audio) * 1000 / settings.stt_assumed_bytes_per_second)
+
+
 def estimate_ms(audio: bytes) -> int:
     """What to hold for, before anything has decoded the file.
 
@@ -159,7 +178,7 @@ def estimate_ms(audio: bytes) -> int:
     exact = wav_duration_ms(audio)
     if exact is not None:
         return exact
-    return math.ceil(len(audio) * 1000 / settings.stt_assumed_bytes_per_second)
+    return _estimate_from_bytes(audio)
 
 
 async def transcribe(
@@ -193,7 +212,9 @@ async def transcribe(
     if exact_ms is not None:
         _refuse_if_too_long(exact_ms, exact=True)
     _refuse_if_too_large(audio, exact_ms)
-    estimated_ms = exact_ms if exact_ms is not None else estimate_ms(audio)
+    # `_estimate_from_bytes` rather than `estimate_ms`: the header walk above
+    # already returned `None` for this upload, and `estimate_ms` would repeat it.
+    estimated_ms = exact_ms if exact_ms is not None else _estimate_from_bytes(audio)
     if exact_ms is None:
         _refuse_if_too_long(estimated_ms, exact=False)
 
@@ -395,7 +416,12 @@ async def _keep(
         writer = await recording_store.begin()
         if writer is None:
             return
-        writer.write(audio)
+        # Off the loop, unlike the per-chunk `write` this store was built for:
+        # that one is small and deliberately synchronous, this one is the whole
+        # upload — up to `STT_MAX_AUDIO_BYTES` of sha256 and a file write — and
+        # at the ceiling it stalls every other request in this worker for tens
+        # of milliseconds. `Writer.write` swallows its own errors either way.
+        await asyncio.to_thread(writer.write, audio)
         committed = await writer.commit(audio_format=_extension_of(filename))
         if committed is None:
             return
