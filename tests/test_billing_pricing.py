@@ -209,3 +209,53 @@ def test_display_strings_never_go_through_a_float():
     assert format_credits(0) == "0.000000"
     assert format_uzs(5_000_000) == "50000.00"
     assert format_uzs(1) == "0.01"
+
+
+# --- the expired-book term -------------------------------------------------
+
+
+async def test_a_lapsed_price_book_is_not_the_active_one(session, price_book):
+    """`status` alone does not say a book is current; `effective_to` does.
+
+    A version can be ACTIVE and already over — that is what the column is for,
+    and the table's own check constraint (`effective_to IS NULL OR
+    effective_to > effective_from`) makes NULL the open-ended case rather than
+    a missing value. The query used to filter on `status` and
+    `effective_from` only, so a book whose window had closed kept pricing live
+    work. Nothing raises when that happens: the wrong rate simply commits.
+    """
+    from datetime import timedelta
+
+    from app.core.exceptions import ServiceUnavailableError
+    from app.db.base import utcnow
+    from app.models.billing_enums import PriceBookStatus
+    from app.models.price_book import PriceBookVersion
+    from app.services.billing import pricing
+
+    # The fixture's book is open-ended, so it is what `active_price_book` finds.
+    assert (await pricing.active_price_book(session)).id == price_book.id
+
+    # Close its window in the past and it must stop being the active one, even
+    # though its status still says ACTIVE and it still started before now.
+    price_book.effective_to = utcnow() - timedelta(hours=1)
+    await session.flush()
+
+    # Named rather than bare: `pytest.raises(Exception)` would pass on a typo
+    # as happily as on the refusal this asserts, and the docstring on
+    # `active_price_book` argues specifically for a 503 over a 500.
+    with pytest.raises(ServiceUnavailableError) as refusal:
+        await pricing.active_price_book(session)
+    assert refusal.value.code == "price_book_missing"
+
+    # A successor whose window is open takes over.
+    successor = PriceBookVersion(
+        version=2,
+        label="successor",
+        status=PriceBookStatus.ACTIVE,
+        effective_from=utcnow() - timedelta(minutes=30),
+        published_at=utcnow() - timedelta(minutes=30),
+    )
+    session.add(successor)
+    await session.flush()
+
+    assert (await pricing.active_price_book(session)).id == successor.id

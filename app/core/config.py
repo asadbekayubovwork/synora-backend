@@ -15,7 +15,15 @@ class Settings(BaseSettings):
     app_name: str = "Synora API"
     api_prefix: str = "/api/v1"
     environment: str = "development"
-    debug: bool = True
+    # Off by default, and the default is the point. `debug` is what turns
+    # SQLAlchemy's `echo` on (`app/db/session.py`), which writes every
+    # statement to the journal — the password and OTP hash columns among them.
+    # It used to default true, which was harmless only for as long as
+    # production stayed on SQLite, where `echo` is suppressed anyway.
+    # `deploy/README.md` names the `.env` lines to change when moving to
+    # Postgres and this was never one of them, so the safe value has to be the
+    # one nobody has to remember. `assert_production_ready` refuses it too.
+    debug: bool = False
     # Declared rather than detected: uvicorn's worker count cannot be read
     # back reliably, and an honest declared value beats a clever wrong one.
     # Used only by `assert_production_ready`, to refuse a multi-worker boot
@@ -404,6 +412,11 @@ class Settings(BaseSettings):
             problems.append("BILLING_GRACE_* must not be negative")
         if not 1 <= self.billing_hold_extend_at_percent <= 100:
             problems.append("BILLING_HOLD_EXTEND_AT_PERCENT must be between 1 and 100")
+        if self.debug:
+            problems.append(
+                "DEBUG is on, which echoes every SQL statement — including the "
+                "password and OTP hashes — to the journal"
+            )
 
         if problems:
             raise RuntimeError(

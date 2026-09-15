@@ -26,8 +26,9 @@ from app.core.security import (
     create_reset_token,
     decode_token,
     hash_password,
+    hash_password_async,
     reset_token_matches_password,
-    verify_password,
+    verify_password_async,
 )
 from app.db.base import utcnow
 from app.models.oauth import OAuthAccount
@@ -84,12 +85,16 @@ async def register(session: AsyncSession, email: str, password: str) -> IssuedOt
         )
 
     if user is None:
-        user = User(email=email, password_hash=hash_password(password), is_verified=False)
+        user = User(
+            email=email,
+            password_hash=await hash_password_async(password),
+            is_verified=False,
+        )
         session.add(user)
     else:
         # The signup was never finished, so this attempt owns the account:
         # take the newer password and send a fresh code.
-        user.password_hash = hash_password(password)
+        user.password_hash = await hash_password_async(password)
 
     await session.flush()
 
@@ -156,7 +161,7 @@ async def login(session: AsyncSession, email: str, password: str) -> AuthTokens:
     user = await get_user_by_email(session, email)
 
     if user is None:
-        verify_password(password, _DUMMY_HASH)
+        await verify_password_async(password, _DUMMY_HASH)
         raise UnauthorizedError(_INVALID_CREDENTIALS, code="invalid_credentials")
 
     if user.password_hash is None:
@@ -164,14 +169,14 @@ async def login(session: AsyncSession, email: str, password: str) -> AuthTokens:
         # register endpoint already answers 409 for an address that has an
         # account — and without it the user is stuck guessing a password that
         # was never set.
-        verify_password(password, _DUMMY_HASH)
+        await verify_password_async(password, _DUMMY_HASH)
         raise ForbiddenError(
             f"This account signs in with {await _login_methods(session, user)}. "
             "Use that, or set a password with 'Forgot password'.",
             code="password_login_unavailable",
         )
 
-    if not verify_password(password, user.password_hash):
+    if not await verify_password_async(password, user.password_hash):
         raise UnauthorizedError(_INVALID_CREDENTIALS, code="invalid_credentials")
 
     if not user.is_verified:
@@ -292,7 +297,7 @@ async def reset_password(
             code="reset_token_used",
         )
 
-    user.password_hash = hash_password(password)
+    user.password_hash = await hash_password_async(password)
 
     # Any code still outstanding for this address is now moot.
     await discard_codes(session, email, OtpPurpose.RESET_PASSWORD)

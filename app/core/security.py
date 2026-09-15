@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import secrets
@@ -40,6 +41,24 @@ def verify_password(password: str, password_hash: str) -> bool:
         # A malformed hash in the database must read as "wrong password",
         # never as a 500.
         return False
+
+
+# bcrypt is deliberately slow — that is the whole point of it — and at the
+# cost factor `gensalt()` picks it measures ~220 ms a call on a developer
+# laptop. Spent inside an `async def` that is 220 ms in which this worker
+# serves nobody: not another request, not a live transcription socket, not a
+# health probe. `WORKER_COUNT` defaults to 1, so on the shipped configuration
+# that is the whole API.
+#
+# The synchronous pair above stays, because a module that hashes at import
+# time needs it and so do the tests. Everything reached from a request should
+# use these two instead.
+async def hash_password_async(password: str) -> str:
+    return await asyncio.to_thread(hash_password, password)
+
+
+async def verify_password_async(password: str, password_hash: str) -> bool:
+    return await asyncio.to_thread(verify_password, password, password_hash)
 
 
 # --- OTP -------------------------------------------------------------------

@@ -18,7 +18,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BadRequestError, ServiceUnavailableError
@@ -193,6 +193,16 @@ async def active_price_book(session: AsyncSession, at: datetime | None = None) -
             .where(
                 PriceBookVersion.status == PriceBookStatus.ACTIVE,
                 PriceBookVersion.effective_from <= moment,
+                # A version can be ACTIVE and already over: `effective_to` is
+                # the column that says so, and the check constraint on the
+                # table (`effective_to IS NULL OR effective_to > effective_from`)
+                # means NULL is the open-ended case rather than a missing value.
+                # Without this term an expired book keeps pricing live work,
+                # which is the kind of error that only shows up in the ledger.
+                or_(
+                    PriceBookVersion.effective_to.is_(None),
+                    PriceBookVersion.effective_to > moment,
+                ),
             )
             .order_by(PriceBookVersion.effective_from.desc(), PriceBookVersion.version.desc())
             .limit(1)

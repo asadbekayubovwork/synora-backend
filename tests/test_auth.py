@@ -252,3 +252,47 @@ async def test_refresh_returns_a_usable_pair(client: AsyncClient):
 
     me = await client.get("/auth/me", headers={"Authorization": f"Bearer {new_access}"})
     assert me.status_code == 200
+
+
+# --- bcrypt off the event loop ---------------------------------------------
+
+
+async def test_hashing_a_password_does_not_stall_the_event_loop():
+    """bcrypt is slow on purpose; the loop must not be the thing waiting.
+
+    At the cost factor `gensalt()` picks, one hash measures ~220 ms. Spent
+    inside an `async def` that is 220 ms in which this worker serves nobody —
+    and `WORKER_COUNT` defaults to 1, so it is the whole API. Worse on login:
+    the timing equaliser runs bcrypt for addresses that have no account, so an
+    unauthenticated caller could hold the loop for as long as they kept
+    guessing.
+
+    The ticker is the assertion. It cannot advance while the loop is blocked,
+    so a non-trivial tick count is proof the hash ran somewhere else.
+    """
+    import asyncio
+
+    from app.core.security import hash_password_async, verify_password_async
+
+    ticks = 0
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.005)
+            ticks += 1
+
+    beat = asyncio.create_task(ticker())
+    try:
+        await asyncio.sleep(0.02)          # let it settle
+        ticks = 0
+        digest = await hash_password_async(PASSWORD)
+        assert await verify_password_async(PASSWORD, digest) is True
+        assert await verify_password_async("wrong", digest) is False
+    finally:
+        beat.cancel()
+
+    # Two hashes and a verify is ~600 ms of work; at 5 ms a tick that is well
+    # over a hundred. Ten is the floor a heavily loaded CI box should still
+    # clear, and a blocking implementation scores zero or one.
+    assert ticks >= 10, f"event loop advanced only {ticks} times during bcrypt"
