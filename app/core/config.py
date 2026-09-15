@@ -48,6 +48,22 @@ class Settings(BaseSettings):
     otp_max_attempts: int = 5
     otp_resend_cooldown_seconds: int = 60
 
+    # --- Login throttle ------------------------------------------------------
+    # Password checking is the most expensive thing an unauthenticated caller
+    # can ask this service to do — one bcrypt is ~220 ms of a core — and
+    # `/auth/login` answers identically for an unknown address, by design, so
+    # the cost is paid whether or not the account exists. Two windows because
+    # the two attacks are different shapes: many passwords against one account
+    # is caught per-email, one password against many accounts is caught
+    # per-IP. The per-IP figure is the looser of the two because an office
+    # behind one NAT is a normal thing and a locked-out office is not.
+    #
+    # Fixed windows, in Redis. Without Redis this is off rather than broken —
+    # see `NullCache.increment`.
+    login_max_per_email: int = 5
+    login_max_per_ip: int = 30
+    login_window_seconds: int = 60
+
     # --- OAuth -------------------------------------------------------------
     # How long a sign-in may sit between `/authorize` and `/callback`.
     oauth_state_ttl_minutes: int = 10
@@ -170,6 +186,15 @@ class Settings(BaseSettings):
     # is what stops an abandoned browser tab from holding a GPU slot and a
     # wallet's credit until the reaper comes past.
     stt_stream_idle_seconds: int = 60
+    # How long the tail of a finished session may take. After `stop` — or a
+    # hang-up — the event pump waits for upstream's `done`, which is the last
+    # of the transcript and not optional. This used to reuse
+    # `STT_READ_TIMEOUT_SECONDS`, whose 300 is sized for a cold model load on a
+    # file upload and has nothing to do with draining a socket. The caller is
+    # billed for the wait, and `session_ms` is stamped after it, so an upstream
+    # that answers pings but never says `done` was charging for dead air.
+    # A peer with anything left to send sends it in well under this.
+    stt_stream_drain_seconds: int = 15
 
     # --- Recordings --------------------------------------------------------
     # Keep every delivered synthesis: its text and parameters in
@@ -221,28 +246,17 @@ class Settings(BaseSettings):
     # Credit granted to a new account on first verification. Zero disables it.
     billing_signup_bonus_micros: int = 0
     billing_signup_bonus_days: int = 30
-    # Below this, `GET /v1/wallet` reports `low_balance` and the SSE stream
-    # emits a warning. Zero disables it.
+    # Below this, `GET /v1/wallet` reports `low_balance`. Zero disables it.
+    # There is no push side to this yet — the flag is read when the wallet is
+    # asked for and nothing emits it — so a client that wants to warn has to
+    # poll. Said plainly here because the comment used to promise an SSE
+    # stream that has never existed.
     billing_low_balance_micros: int = 0
-    # A live call that runs out gets this long, and this much unfunded spend,
-    # before it is cut. Whichever runs out first wins. The overrun is written
-    # off rather than lent: a prepaid product should not acquire a debt nobody
-    # will collect, and keeping the balance non-negative keeps the strongest
-    # check constraints in the schema intact.
-    billing_grace_seconds: int = 30
+    # How much unfunded spend a live call gets before it is cut. The overrun
+    # is written off rather than lent: a prepaid product should not acquire a
+    # debt nobody will collect, and keeping the balance non-negative keeps the
+    # strongest check constraints in the schema intact.
     billing_grace_micros: int = 5_000_000
-    # How much of a realtime session to hold up front, and the bounds on it.
-    billing_hold_seconds: int = 120
-    billing_hold_min_micros: int = 1_000_000
-    billing_hold_max_micros: int = 500_000_000
-    # Extend the hold once this fraction of it has been consumed. A declined
-    # extension is the zero-balance signal, which is why it fires early: it
-    # gives the warning a hold-window of lead time instead of arriving at the
-    # same instant as the disconnect.
-    billing_hold_extend_at_percent: int = 70
-    # Local day boundary for the usage rollups. A user comparing "today"
-    # against their own clock is five hours out if this is UTC.
-    billing_rollup_timezone: str = "Asia/Tashkent"
 
     # --- CORS --------------------------------------------------------------
     # Comma separated so the .env stays readable; "*" allows any origin.
@@ -387,6 +401,8 @@ class Settings(BaseSettings):
             problems.append("STT_MAX_AUDIO_* must be positive")
         if self.stt_assumed_bytes_per_second < 1:
             problems.append("STT_ASSUMED_BYTES_PER_SECOND must be positive")
+        if self.stt_stream_drain_seconds < 1:
+            problems.append("STT_STREAM_DRAIN_SECONDS must be at least 1")
         if self.stt_stream_max_seconds < 1 or self.stt_stream_idle_seconds < 1:
             problems.append("STT_STREAM_* must be positive")
 
@@ -408,10 +424,8 @@ class Settings(BaseSettings):
                 "WORKER_COUNT > 1 requires REDIS_URL "
                 "(the background-job lease and the SSE fan-out both need it)"
             )
-        if self.billing_grace_micros < 0 or self.billing_grace_seconds < 0:
-            problems.append("BILLING_GRACE_* must not be negative")
-        if not 1 <= self.billing_hold_extend_at_percent <= 100:
-            problems.append("BILLING_HOLD_EXTEND_AT_PERCENT must be between 1 and 100")
+        if self.billing_grace_micros < 0:
+            problems.append("BILLING_GRACE_MICROS must not be negative")
         if self.debug:
             problems.append(
                 "DEBUG is on, which echoes every SQL statement — including the "

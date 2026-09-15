@@ -1,12 +1,21 @@
 """Pre-aggregated usage, so a dashboard never scans `usage_events`.
 
-`day` is the local calendar day in `settings.billing_rollup_timezone`, not UTC.
-The product is Uzbekistan-facing, and a user comparing "today" against their
-own clock is five hours out otherwise.
+**Nothing writes this table and nothing reads it.** The design below is what it
+was migrated for; none of it was built. `rollup_service` does not exist,
+`GET /v1/usage` scans `usage_events` directly — which is the cost this was
+meant to remove — and `billing_rollup_timezone` was deleted along with the
+other settings that looked load-bearing and were read by nobody.
 
-Maintained by upsert as usage arrives, and rebuildable from `usage_events` by
-`rollup_service.rebuild_day()` — with a test asserting the two agree, because a
-rollup nobody can reconstruct is a number nobody can trust.
+The table and this class are kept rather than dropped: the schema is migrated,
+the design is sound, and the work to finish it is smaller than the work to
+remove and re-add it. Treat the paragraph below as a specification, not a
+description of running code.
+
+`day` was to be the local calendar day rather than UTC — the product is
+Uzbekistan-facing and a user comparing "today" against their own clock is five
+hours out otherwise — maintained by upsert as usage arrives and rebuildable
+from `usage_events`, with a test asserting the two agree, because a rollup
+nobody can reconstruct is a number nobody can trust.
 """
 
 from __future__ import annotations

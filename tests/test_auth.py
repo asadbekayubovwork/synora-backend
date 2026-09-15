@@ -296,3 +296,82 @@ async def test_hashing_a_password_does_not_stall_the_event_loop():
     # over a hundred. Ten is the floor a heavily loaded CI box should still
     # clear, and a blocking implementation scores zero or one.
     assert ticks >= 10, f"event loop advanced only {ticks} times during bcrypt"
+
+
+# --- the login throttle ----------------------------------------------------
+
+
+async def test_login_is_throttled_per_address(client: AsyncClient, monkeypatch):
+    """Wrong passwords cost the server ~220 ms of bcrypt each, and the endpoint
+    runs it for unknown addresses too so that its answer cannot be used to
+    discover which emails are registered. Without a budget that property is a
+    free denial-of-service.
+    """
+    from app.core import throttle
+    from app.core.cache import NullCache
+    from app.core.config import settings
+
+    counts: dict[str, int] = {}
+
+    class Counting(NullCache):
+        async def increment(self, key: str, ttl_seconds: int) -> int:
+            counts[key] = counts.get(key, 0) + 1
+            return counts[key]
+
+    monkeypatch.setattr(throttle, "get_cache", Counting)
+    monkeypatch.setattr(settings, "login_max_per_email", 3)
+    monkeypatch.setattr(settings, "login_max_per_ip", 1000)
+
+    await register_and_verify(client)
+
+    for _ in range(3):
+        wrong = await client.post(
+            "/auth/login", json={"email": EMAIL, "password": "not-the-password"}
+        )
+        assert wrong.status_code == 401
+
+    refused = await client.post(
+        "/auth/login", json={"email": EMAIL, "password": "not-the-password"}
+    )
+    assert refused.status_code == 429
+    assert refused.json()["code"] == "login_throttled"
+    assert "Retry-After" in refused.headers
+
+    # The budget is spent on the address, not on the password: the right one is
+    # refused too, which is the point — an attacker who guesses correctly on
+    # the next try still has to wait.
+    assert (
+        await client.post("/auth/login", json={"email": EMAIL, "password": PASSWORD})
+    ).status_code == 429
+
+
+async def test_the_throttle_counts_before_the_password_is_checked(
+    client: AsyncClient, monkeypatch
+):
+    """An address with no account must cost the same as one with.
+
+    If the limiter ran after the lookup, an attacker could tell registered
+    addresses from unregistered ones by which of them started answering 429 —
+    reintroducing the enumeration oracle the endpoint is built to close.
+    """
+    from app.core import throttle
+    from app.core.cache import NullCache
+    from app.core.config import settings
+
+    counts: dict[str, int] = {}
+
+    class Counting(NullCache):
+        async def increment(self, key: str, ttl_seconds: int) -> int:
+            counts[key] = counts.get(key, 0) + 1
+            return counts[key]
+
+    monkeypatch.setattr(throttle, "get_cache", Counting)
+    monkeypatch.setattr(settings, "login_max_per_email", 2)
+    monkeypatch.setattr(settings, "login_max_per_ip", 1000)
+
+    nobody = {"email": "ghost@example.com", "password": "whatever-it-is"}
+    for _ in range(2):
+        assert (await client.post("/auth/login", json=nobody)).status_code == 401
+
+    refused = await client.post("/auth/login", json=nobody)
+    assert refused.status_code == 429, "an unknown address must be throttled too"

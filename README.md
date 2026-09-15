@@ -346,9 +346,12 @@ making the user guess.
 
 A *live* call is different — cutting someone off mid-sentence because the
 balance crossed zero between two heartbeats is a bad experience for the sake of
-a few micros. So the caller is warned, then gets `BILLING_GRACE_SECONDS` and
-`BILLING_GRACE_MICROS` of overrun, and then the call ends cleanly with a
-reason. The overrun is **written off, not lent**: a prepaid product should not
+a few micros. So the caller gets `BILLING_GRACE_MICROS` of overrun, and then
+the call ends cleanly with a reason. There is no warning ahead of it and no
+time-based grace: a realtime session reserves its whole ceiling up front and
+settles the difference, so the balance cannot cross zero mid-session in the
+first place. The knobs that described a warning and a grace window were
+removed — nothing read them. The overrun is **written off, not lent**: a prepaid product should not
 acquire a debt nobody will collect, and refusing to let a balance go negative
 keeps the strongest constraints in the schema intact. A write-off moves no
 money, so it appears on a counter and not on the ledger.
@@ -752,9 +755,10 @@ Everything lives in `.env`; see [.env.example](.env.example) for the full list.
 | `WORKER_COUNT` | `1` | Declared, not detected. Only used to refuse a multi-worker boot without Redis |
 | `BILLING_SIGNUP_BONUS_MICROS` | `0` | Welcome credit. `0` disables it |
 | `BILLING_LOW_BALANCE_MICROS` | `0` | Below this, the wallet reports `is_low` |
-| `BILLING_GRACE_SECONDS` / `_MICROS` | `30` / `5000000` | How far a live call may overrun before it is cut. Written off, not lent |
-| `BILLING_HOLD_SECONDS` | `120` | How much of a realtime session to reserve up front |
-| `BILLING_ROLLUP_TIMEZONE` | `Asia/Tashkent` | Local day boundary for usage reports |
+| `BILLING_GRACE_MICROS` | `5000000` | How far a live call may overrun before it is cut. Written off, not lent |
+| `LOGIN_MAX_PER_EMAIL` / `LOGIN_MAX_PER_IP` | `5` / `30` | Sign-in attempts per `LOGIN_WINDOW_SECONDS`, per address and per client IP. Needs Redis; without it the throttle is off, not broken |
+| `LOGIN_WINDOW_SECONDS` | `60` | The window both login limits are counted in |
+| `STT_STREAM_DRAIN_SECONDS` | `15` | How long a finished realtime session may wait for upstream's last transcript. Billed to the caller, so it is short |
 | `TTS_BASE_URL` / `TTS_API_KEY` | unset | Unset ⇒ every `/tts` route answers `503`. One without the other is refused at boot. Full list in [docs/TTS.md](docs/TTS.md#configuration) |
 | `STT_STREAM_MAX_SECONDS` / `STT_STREAM_IDLE_SECONDS` | `600` / `60` | The cap on one live socket — and the size of its up-front hold — and how long it may stay silent |
 | `STT_BASE_URL` / `STT_API_KEY` | unset | Unset ⇒ `/stt/transcribe` answers `503`. Sent as `X-Token`, not `X-API-Key`. Full list in [docs/STT.md](docs/STT.md#configuration) |

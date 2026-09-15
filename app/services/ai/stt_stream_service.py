@@ -278,6 +278,7 @@ async def _relay(
     async def pump_audio() -> None:
         last_audio = time.monotonic()
         last_touch = time.monotonic()
+        touch: asyncio.Task[None] | None = None
         while True:
             timeout = settings.stt_stream_idle_seconds
             try:
@@ -298,7 +299,16 @@ async def _relay(
                 now = time.monotonic()
                 if now - last_touch >= PROGRESS_TOUCH_INTERVAL_SECONDS:
                     last_touch = now
-                    await _touch(outcome.ai_session_id)
+                    # Started, not awaited. `_touch` opens its own session, and
+                    # `app/db/session.py` sets no `pool_timeout` — so under pool
+                    # pressure awaiting it here is the microphone waiting on the
+                    # database, once every thirty seconds, for as long as
+                    # SQLAlchemy's default takes to give up. The handle is kept
+                    # because a task nobody holds can be collected mid-flight,
+                    # and a still-running touch is reason enough to skip the
+                    # next one rather than pile them up.
+                    if touch is None or touch.done():
+                        touch = asyncio.create_task(_touch(outcome.ai_session_id))
             elif message.get("text"):
                 # The only control message a client sends mid-session.
                 if _is_stop(message["text"]):
@@ -317,6 +327,13 @@ async def _relay(
         # has already closed are transcript the caller has paid for, and
         # dropping the socket here would throw them away.
         stopping.set()
+        if touch is not None and not touch.done():
+            # Cancelled rather than awaited: `_touch` already declares a missed
+            # heartbeat not worth the stream, and the case this exists for is a
+            # database too slow to answer.
+            touch.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await touch
         with contextlib.suppress(Exception):
             await upstream.stop()
 
@@ -372,8 +389,15 @@ async def _relay(
         # has upstream's `done` to wait for, which is the tail of the
         # transcript and is not optional — see `stt_stream_client`.
         await audio_task
+        # Its own budget rather than `stt_read_timeout_seconds`, which is sized
+        # for a cold model load on a file upload. The caller is billed for this
+        # wait — `session_ms` is stamped after it returns — so a peer that
+        # answers pings but never sends `done` was charging for dead air at
+        # five minutes a session.
         with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(events_task, timeout=settings.stt_read_timeout_seconds)
+            await asyncio.wait_for(
+                events_task, timeout=settings.stt_stream_drain_seconds
+            )
     finally:
         for task in (audio_task, events_task):
             if not task.done():

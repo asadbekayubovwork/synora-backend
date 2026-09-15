@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Request, status
 
 from app.api.deps import CurrentUser, SessionDep, get_user_from_refresh_token
 from app.core.config import settings
+from app.core import throttle
 from app.schemas.auth import (
     ErrorResponse,
     ForgotPasswordRequest,
@@ -115,10 +116,39 @@ async def resend_otp(payload: ResendOtpRequest, session: SessionDep) -> OtpSentR
         "Wrong password and unknown email answer identically (`401`), so this endpoint "
         "cannot be used to discover which emails are registered. An account that never "
         "finished verification gets `403` with code `email_not_verified` — send the user "
-        "back to the code step via `POST /auth/resend-otp`."
+        "back to the code step via `POST /auth/resend-otp`.\n\n"
+        "Throttled on two fixed windows — per address and per client IP — and "
+        "`429` carries `Retry-After` naming the second the window resets. The "
+        "per-address budget is the tighter of the two, because many passwords "
+        "against one account is the attack and an office behind one NAT is not."
     ),
 )
-async def login(payload: LoginRequest, session: SessionDep) -> TokenResponse:
+async def login(
+    payload: LoginRequest, session: SessionDep, request: Request
+) -> TokenResponse:
+    # Before the password is checked, because checking it is the expense being
+    # rationed: `/auth/login` runs bcrypt even for an address with no account,
+    # so that the answer cannot be used to discover which emails are
+    # registered. That property is worth keeping and worth not paying for
+    # unboundedly.
+    await throttle.enforce(
+        subject=payload.email.lower(),
+        action="login",
+        limit=settings.login_max_per_email,
+        window_seconds=settings.login_window_seconds,
+        message="Too many sign-in attempts for this account. Please wait and try again.",
+        code="login_throttled",
+    )
+    if request.client:
+        await throttle.enforce(
+            subject=request.client.host,
+            action="login_ip",
+            limit=settings.login_max_per_ip,
+            window_seconds=settings.login_window_seconds,
+            message="Too many sign-in attempts from this address. Please wait and try again.",
+            code="login_throttled",
+        )
+
     tokens = await auth_service.login(session, payload.email, payload.password)
     return TokenResponse(
         access_token=tokens.access_token,

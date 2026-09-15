@@ -42,6 +42,7 @@ from prometheus_client import CONTENT_TYPE_LATEST
 from app.api.internal.router import internal_router
 from app.api.v1.router import api_router
 from app.core.broker import close_broker
+from app.core.cache import close_cache
 from app.core.config import settings
 from app.core.exceptions import (
     NotFoundError,
@@ -246,6 +247,10 @@ async def lifespan(_: FastAPI):
     await tts_client.aclose_client()
     await stt_client.aclose_client()
     await close_broker()
+    # `close_cache` is the twin of `close_broker` and was the one thing this
+    # list forgot: the Redis pool stayed open across a shutdown that closed
+    # everything else.
+    await close_cache()
     await close_db()
 
 
