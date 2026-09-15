@@ -23,3 +23,8 @@ htmlcov/
 
 # Server logs
 *.log
+
+# Claude Code's project config: agents, commands, skills and rules. Local
+# tooling rather than the product, and checked in it would land on every
+# clone — so it stays out until somebody decides the team wants it shared.
+.claude/
