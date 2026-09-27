@@ -418,6 +418,40 @@ async def test_held_credit_is_read_from_the_wallets_not_from_counters(
     assert sample(body, "synora_wallet_balance_micros", bucket="paid") == 1_000_000
 
 
+async def test_voice_calls_in_progress_are_read_from_the_call_rows(
+    client, session, wallet, price_book, open_metrics
+):
+    """Live means not yet settled; an ended call drops out of the gauge at once."""
+    from app.db.base import utcnow
+    from app.models.billing_enums import AiSessionKind, BillingService
+    from app.models.voice_call import VoiceCall
+    from app.services.billing import session_service
+
+    body = await scrape(client)
+    assert sample(body, "synora_voice_calls_live") == 0
+
+    tickets = []
+    for _ in range(2):
+        ticket = await session_service.open_oneshot(
+            session,
+            user_id=wallet.user_id,
+            service=BillingService.VOICE_AGENT,
+            model_key="synora-voice-agent",
+            quantities={},
+            scope="voice",
+            kind=AiSessionKind.REALTIME,
+        )
+        session.add(VoiceCall(id=ticket.ai_session_id, user_id=wallet.user_id, last_seen_at=utcnow()))
+        tickets.append(ticket.ai_session_id)
+    await session.commit()
+    assert sample(await scrape(client), "synora_voice_calls_live") == 2
+
+    ended = await session.get(VoiceCall, tickets[0])
+    ended.ended_at = utcnow()
+    await session.commit()
+    assert sample(await scrape(client), "synora_voice_calls_live") == 1
+
+
 async def test_a_gauge_that_cannot_be_read_does_not_take_the_scrape_down(
     client, open_metrics, monkeypatch
 ):

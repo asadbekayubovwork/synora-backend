@@ -28,3 +28,8 @@ htmlcov/
 # tooling rather than the product, and checked in it would land on every
 # clone — so it stays out until somebody decides the team wants it shared.
 .claude/
+
+# The voice agent's operator quickstart carries a live `ui` API key. The key
+# belongs in `.env` (VOICE_AGENT_API_KEY); docs/UI_INTEGRATION_GUIDE.md is the
+# same material with placeholders and is the one to share.
+docs/QUICKSTART.md

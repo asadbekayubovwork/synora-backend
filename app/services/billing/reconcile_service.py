@@ -43,7 +43,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import timedelta
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import as_utc, utcnow
@@ -51,12 +51,15 @@ from app.models.ai_session import AiSession
 from app.models.billing_enums import (
     TERMINAL_BATCH_STATES,
     TERMINAL_SESSION_STATUSES,
+    AiSessionKind,
     AiSessionStatus,
+    BillingService,
     LedgerBucket,
     SessionEndReason,
 )
 from app.models.ledger import LedgerEntry
 from app.models.tts_job import TtsBatchJob
+from app.models.voice_call import OWN_SESSION_KEY_PATTERN, VoiceCall
 from app.models.wallet import Wallet
 from app.services.billing import session_service, wallet_repo
 
@@ -374,6 +377,23 @@ async def reap_expired_sessions(session: AsyncSession, *, limit: int = 500) -> i
         )
         .exists()
     )
+    # Any call row at all, live or ended: an ended call's session is terminal
+    # and never a candidate anyway, and "has a call" is the cheaper question.
+    voice_call = select(VoiceCall.id).where(VoiceCall.id == AiSession.id).exists()
+    # And a voice call's session whose row was never written — a process that
+    # died between the hold and the insert. Those are the voice sweep's to
+    # release at zero; reaped here they would be billed their whole ceiling for
+    # an offer that never reached the agent. Recognised by the key only that
+    # module's sessions carry, and scoped to the service so no other caller's
+    # key can be shaped to match.
+    voice_orphan = and_(
+        AiSession.service == BillingService.VOICE_AGENT,
+        AiSession.kind == AiSessionKind.REALTIME,
+        # `coalesce`, because a NULL key makes the LIKE NULL, the `and_` NULL
+        # and its negation NULL too — which a WHERE reads as false, silently
+        # taking every keyless voice session out of this pass.
+        func.coalesce(AiSession.idempotency_key, "").like(OWN_SESSION_KEY_PATTERN),
+    )
     rows = (
         await session.execute(
             select(
@@ -400,6 +420,16 @@ async def reap_expired_sessions(session: AsyncSession, *, limit: int = 500) -> i
                     AiSession.last_heartbeat_at < quiet_before,
                 ),
                 ~live_batch_job,
+                # Voice calls own their deadline alone, as batch jobs do, and
+                # for a sharper reason. A claimed session reaped here is billed
+                # at its estimate, and a voice call's estimate is its whole
+                # ceiling — ten minutes charged to a tab that crashed ten seconds
+                # in. `voice_agent_service.sweep` bills those to their last
+                # heartbeat instead. By the call row rather than by service:
+                # `voice_agent` is also the service the agent-reported sessions
+                # of `docs/INTERNAL_API.md` bill under, and those are this pass's.
+                ~voice_call,
+                ~voice_orphan,
             )
             # Oldest deadline first: if `limit` bites, the credit that has been
             # frozen longest comes back first.

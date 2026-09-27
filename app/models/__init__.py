@@ -40,6 +40,7 @@ from app.models.tts_recording import TtsRecording
 from app.models.usage import UsageEvent, UsageEventItem
 from app.models.usage_rollup import UsageDailyRollup
 from app.models.user import User, normalize_email
+from app.models.voice_call import VoiceCall
 from app.models.wallet import Wallet
 
 __all__ = [
@@ -81,6 +82,7 @@ __all__ = [
     "UsageEventStatus",
     "UsageMetric",
     "User",
+    "VoiceCall",
     "Wallet",
     "normalize_email",
 ]

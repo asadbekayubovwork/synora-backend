@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Synora TTS — Dev UI</title>
+<title>Synora — Dev UI</title>
 <style>
   :root {
     --bg: #0d1117; --panel: #131a23; --panel-2: #182130; --line: #232e3d;
@@ -91,11 +91,19 @@
            transition: .2s; pointer-events: none; max-width: 380px; z-index: 9; }
   .toast.show { opacity: 1; transform: none; }
   .toast.err { border-left-color: var(--err); }
+  .chat { display: flex; flex-direction: column; gap: 6px; max-height: 340px; overflow-y: auto; }
+  .msg { max-width: 85%; padding: 6px 10px; border-radius: 10px; font-size: 13.5px; line-height: 1.5;
+         border: 1px solid var(--line); background: var(--bg); overflow-wrap: anywhere; }
+  .msg.user { align-self: flex-end; border-color: #1f3d66; background: #0f1b2b; }
+  .msg.agent { align-self: flex-start; }
+  .msg.partial { color: var(--muted); font-style: italic; border-style: dashed; }
+  .msg.sys { align-self: center; max-width: none; border: none; background: none; padding: 0;
+             font: 11px var(--mono); color: var(--muted); }
 </style>
 </head>
 <body>
 <header>
-  <h1>Synora TTS · Dev UI</h1>
+  <h1>Synora · Dev UI</h1>
   <span class="dot" id="health"></span>
   <span id="healthText" style="font-size:12px;color:var(--muted)">tekshirilmoqda…</span>
   <span class="pill" id="ttsPill">TTS: ?</span>
@@ -146,6 +154,7 @@
       <button data-tab="recordings">Yozuvlar</button>
       <button data-tab="stt">Matnga</button>
       <button data-tab="live">Jonli</button>
+      <button data-tab="agent">Agent</button>
       <button data-tab="usage">Usage</button>
       <button data-tab="wallet">Wallet</button>
       <button data-tab="admin">Admin</button>
@@ -400,6 +409,85 @@ bob2 | Ikkinchi bob.</textarea>
       </div>
     </div>
 
+    <!-- --------------------------------------------------------- agent -->
+    <div class="tab" id="tab-agent">
+      <div class="body">
+        <div class="card" style="margin-top:0">
+          <h3>Sozlama</h3>
+          <div class="kv" id="agentCfgKv"><span>holat</span><span>yuklanmagan</span></div>
+          <div class="hint" id="agentHoldHint"></div>
+        </div>
+
+        <div class="grid2">
+          <div><label>Holat</label><div class="tok" id="agentState" style="max-height:none">qo'ng'iroq yo'q</div></div>
+          <div><label>Vaqt · heartbeat</label><div class="tok" id="agentClock" style="max-height:none">—</div></div>
+        </div>
+        <div class="row">
+          <button id="btnAgentStart" class="primary">qo'ng'iroq qilish</button>
+          <button id="btnAgentStop" class="danger" disabled>tugatish</button>
+          <button id="btnAgentMute" disabled>mikrofonni o'chirish</button>
+          <button id="btnAgentConfig">/voice/config</button>
+        </div>
+        <!-- controls'siz audio ko'rinmaydi, lekin chaladi: agentning ovozi shu. -->
+        <audio id="agentAudio" autoplay></audio>
+
+        <div class="card" id="agentChatCard" style="display:none">
+          <h3>Suhbat <span class="counter" id="agentEvents"></span></h3>
+          <div class="chat" id="agentChat"></div>
+        </div>
+
+        <div class="card" id="agentBillCard" style="display:none">
+          <h3>Hisob</h3>
+          <div class="kv" id="agentBillKv"></div>
+          <div class="hint" id="agentBillCheck"></div>
+        </div>
+
+        <div class="card">
+          <h3>Qo'ng'iroqlar</h3>
+          <div class="row" style="margin-top:0">
+            <button id="btnAgentCalls">yangilash</button>
+            <button id="btnAgentCallsMore" disabled>ko'proq</button>
+          </div>
+          <div id="agentCalls"></div>
+        </div>
+
+        <div class="hint">
+          Ovoz brauzer bilan agent o'rtasida <b>to'g'ridan-to'g'ri</b> oqadi
+          (WebRTC, UDP). Backend faqat signallingni — offer va ICE
+          candidate'larni — uzatadi va agent kalitini o'zida saqlaydi. Audio
+          bizdan o'tmagani uchun server qo'ng'iroq qancha davom etganini
+          <b>heartbeat</b>dan biladi: birinchisi media ulanganda, keyin
+          sozlamadagi oraliqda. Hisob agent javob bergan paytdan tugatishgacha,
+          server soatida.<br><br>
+          Heartbeat timeout ichida kelmasa, server qo'ng'iroqni darhol
+          yopmaydi — avval agentdan so'raydi. Agent uni hali ushlab turgan
+          bo'lsa, hisob davom etadi; ushlamayotgan bo'lsa — oxirgi tiriklik
+          dalili + bitta oraliqqacha, <code>disputed</code> belgisi bilan.
+          Klient ham kutib o'tirmaydi: timeout davomida birorta heartbeat
+          o'tmasa, qo'ng'iroqni o'zi yopadi (<code>heartbeat_lost</code>).<br><br>
+          Hold — <b>shift narxi</b>: qo'ng'iroq ochilishida
+          <code>VOICE_AGENT_MAX_SESSION_SECONDS</code> ga yetadigan kredit band
+          qilinadi va ortig'i tugaganda qaytadi — chap paneldagi
+          <code>reserved</code>. Birinchi heartbeatgacha yetmagan, ya'ni hech
+          qachon ulanmagan qo'ng'iroq <b>bepul</b>: hold to'liq qaytadi.
+          Mikrofonni o'chirish hisobni to'xtatmaydi.<br><br>
+          Liniya peer connection bilan band: <code>DELETE</code> qilingan, lekin
+          agentga hali ulangan qo'ng'iroq ham sanaladi, va keyingisi
+          <code>429 voice_call_still_connected</code> oladi — eski tab
+          yopilguncha. Bunday qo'ng'iroq <code>DELETE</code> gacha hisoblanadi;
+          undan keyingi ovoz hisobsiz — ma'lum cheklov, bitta liniya bilan
+          chegaralangan.<br><br>
+          Bitta tarmoq ichida STUN yetadi; turli tarmoqlar orasida (mobil
+          internet, korporativ NAT) <b>TURN kerak</b> —
+          <code>VOICE_AGENT_TURN_URLS</code> va <code>VOICE_AGENT_TURN_SECRET</code>
+          (har foydalanuvchiga muddatli credential, <b>Sozlama</b> kartasida
+          muddati) yoki <code>VOICE_AGENT_ICE_SERVERS</code>. TURN bo'lmasa media
+          ulanmaydi, qo'ng'iroq 20 s dan keyin <code>connection_failed</code> bilan
+          tugaydi va hech narsa yechilmaydi.
+        </div>
+      </div>
+    </div>
+
     <!-- --------------------------------------------------------- usage -->
     <div class="tab" id="tab-usage">
       <div class="body">
@@ -628,6 +716,9 @@ bob2 | Ikkinchi bob.</textarea>
       ? `<span class="neg">reserved noldan katta.</span> Sessiya tugamagan — tirik stream bo'lmasa,
          <code>POST /admin/reconcile</code> uni qaytaradi.`
       : `reserved nolda — har sintezdan keyin tekshirishga arzigan yagona raqam.`;
+    // Agent yorlig'idagi "balans holdga yetadimi" — balans qaysi yorliqda
+    // yangilanmasin, o'sha zahoti qayta hisoblanadi.
+    agentHoldHint();
   }
 
   const walletNow = () => api("GET", "/wallet").then((w) => { renderWallet(w); return w; });
@@ -1251,6 +1342,666 @@ bob2 | Ikkinchi bob.</textarea>
 
   $("btnLiveStart").addEventListener("click", () => liveStart().catch((e) => liveSay(String(e), "err")));
   $("btnLiveStop").addEventListener("click", liveStopSending);
+
+  // ------------------------------------------------------------ agent (WebRTC)
+  //
+  // Frontendga beriladigan o'sha `voice-agent-client.js`, o'zgartirmasdan. Bu
+  // yorliq modulni sinaydi, o'zining qo'ng'iroq kodini emas: shu yerda ishlagan
+  // qo'ng'iroq frontendda ham ishlaydi, shu yerda buzilgani u yerda ham buziladi.
+  // Shuning uchun sahifa qo'ng'iroq haqida faqat modul frontendga ham beradigan
+  // narsalarni biladi — callback'lar, `call.id`, `error.sessionId` — va
+  // `window.fetch` ga tegmaydi: so'rovlarni ko'rish uchun modulning o'z `fetch`
+  // opsiyasi bor.
+  //
+  // Modul dinamik `import()` bilan va faqat kerak bo'lganda yuklanadi: qolgan
+  // sahifa klassik skript bo'lib qoladi, `file://` dan ochilgan sahifada esa
+  // faqat shu yorliq ishlamaydi.
+  const agent = {
+    mod: null,          // import() promise'i; xato bo'lsa null — keyingi bosish qayta urinadi
+    cfg: null,          // oxirgi GET /voice/config
+    call: null,         // startVoiceCall qaytargan dastak
+    abort: null,        // ulanish paytidagi AbortController — ulanayotganda "tugatish" shuni uzadi
+    attempt: 0,         // "qo'ng'iroq qilish" bosilishlari: eski urinishning kechikkan javobi yangisini bosmasin
+    offer: null,        // shu urinishdagi POST /voice/sessions javobi (promise) — faqat bekor qilinganda kerak
+    before: null,       // qo'ng'iroqdan oldingi wallet — yechilganni narx bilan solishtirish uchun
+    warned: false,
+    state: "",
+    partial: null,      // foydalanuvchining hali final bo'lmagan (kulrang) gapi
+    events: 0,
+    clock: 0,
+    retry: 0,           // Retry-After sanog'ining taymeri
+    cursor: "",
+    id: null,           // call.id — startVoiceCall qaytgandan keyin
+    // Soat. Sahifa soatida (performance.now()), server soati bilan bog'lab.
+    answeredAt: 0,      // startVoiceCall qaytgan payt: agent javob bergan, hisob shu yerdan
+    connectedAt: 0,     // onState("connected") — modul birinchi heartbeat'ni shu zahoti yuboradi
+    endedAt: 0,         // onState("ended")
+    anchor: 0,          // oxirgi heartbeat kelgan payt − uning elapsed_ms: answered_at, server soatida
+    beats: 0,
+    lastBeat: 0,
+    action: "",
+    remainingMs: 0,
+    beatErrors: 0,      // oxirgi muvaffaqiyatli heartbeat'dan keyin o'tmaganlari — logdan
+  };
+
+  const mmss = (s) => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+  const hhmmss = (iso) => (iso ? String(iso).slice(11, 19) : "—");
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function agentModule() {
+    if (!agent.mod) {
+      agent.mod = import("./voice-agent-client.js").catch((e) => {
+        agent.mod = null;
+        throw Object.assign(new Error(
+          "voice-agent-client.js yuklanmadi — sahifani serve.py orqali oching, " +
+          "file:// da modul import qilinmaydi (" + e.message + ")"), { code: "module_load_failed" });
+      });
+    }
+    return agent.mod;
+  }
+
+  // ---- token
+  // `getToken` ni modul har so'rovdan oldin chaqiradi, va u *yaroqli* token
+  // qaytarishi shart: access token 30 daqiqa yashaydi, qo'ng'iroq 10 daqiqagacha.
+  // Login'dan 25 daqiqa o'tib boshlangan qo'ng'iroqning heartbeat'i o'rtada 401
+  // oladi, modul esa `timeout` davomida birorta heartbeat o'tmagan qo'ng'iroqni
+  // `heartbeat_lost` bilan o'zi yopadi. Shuning uchun muddati bir daqiqadan kam
+  // qolgan token shu yerda yangilanadi. Bir vaqtda kelgan chaqiruvlar (heartbeat
+  // va candidates) bitta `/auth/refresh` ni kutadi, har biri o'zinikini emas.
+  const TOKEN_MARGIN_MS = 60000;
+  let refreshing = null;
+
+  function tokenExpiry(token) {
+    try {
+      const claims = String(token).split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+      return JSON.parse(atob(claims)).exp * 1000 || 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  async function freshAccess() {
+    const exp = tokenExpiry(store.access);
+    if (!store.refresh || !exp || exp - Date.now() > TOKEN_MARGIN_MS) return store.access;
+    if (!refreshing) {
+      refreshing = api("POST", "/auth/refresh", { auth: false, body: { refresh_token: store.refresh } })
+        .then(applyTokens)
+        // Eski token bilan davom etadi: rad etilsa, 401 ni modul o'zi ko'taradi.
+        .catch(() => {})
+        .finally(() => { refreshing = null; });
+    }
+    await refreshing;
+    return store.access;
+  }
+
+  // ---- modulning so'rovlari
+  // Offer, candidates, heartbeat va DELETE'ni modul o'zi yuboradi, `api()` dan
+  // o'tmaydi. `fetch` opsiyasi ularni shu yerdan o'tkazadi va har biri qolgan
+  // so'rovlar bilan bitta logga tushadi. Bu kuzatuv, holat manbai emas: soat
+  // `onHeartbeat` dan, id `call.id` / `error.sessionId` dan olinadi — frontend
+  // ham shularni ko'radi. Logdan faqat modul tashqariga bermaydigan uch narsa
+  // o'qiladi, uchalasi ham ko'rsatish uchun: agent rad etgan candidate (modul uni
+  // yutadi — ICE'da boshqalari bor), o'tmagan heartbeat (modul qayta uradi), va
+  // bekor qilingan urinishning offer javobi (`agentFailed` da nega kerakligi).
+  //
+  // Asl `fetch` birinchi `await` dan oldin, sinxron chaqiriladi: `pagehide`
+  // dagi keepalive DELETE sahifa yopilayotgan paytda yuboriladi va keyingi
+  // microtask'ni kutib turmaydi.
+  const API_PREFIX = /^.*?\/api\/v\d+/;
+  const VOICE_OFFER = /^\/voice\/sessions$/;
+
+  async function agentFetch(input, init = {}) {
+    const url = String((input && input.url) || input);
+    const method = String(init.method || "GET").toUpperCase();
+    const path = url.replace(API_PREFIX, "");
+    const payload = sdpless(init.body);
+    const note = init.keepalive ? "keepalive" : undefined;
+    let settleOffer = null;
+    if (method === "POST" && VOICE_OFFER.test(path)) agent.offer = new Promise((r) => (settleOffer = r));
+    const started = performance.now();
+    let res;
+    try {
+      res = await fetch(input, init);
+    } catch (e) {
+      const ms = Math.round(performance.now() - started);
+      // Heartbeat'ning 5 s lik chegarasi `TimeoutError` bo'lib keladi — modul uni 2 s dan keyin qayta uradi.
+      logEntry(method, path, 0, ms, payload, (e && e.name) + ": " + (e && e.message), note);
+      agentNotice(path, 0, null);
+      if (settleOffer) settleOffer(null);
+      throw e;
+    }
+    const ms = Math.round(performance.now() - started);
+    // Klon — asl javobni modul o'qiydi.
+    res.clone().text().then((text) => {
+      let data;
+      try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+      logEntry(method, path, res.status, ms, payload, sdpless(data), note);
+      agentNotice(path, res.status, data);
+      if (settleOffer) settleOffer(data);
+    }).catch(() => settleOffer && settleOffer(null));
+    return res;
+  }
+
+  // SDP ikki tomonda ham 6–10 KB: logni to'ldirmasin — uzunligi yetadi.
+  function sdpless(value) {
+    let data = value;
+    if (typeof data === "string") { try { data = JSON.parse(data); } catch { return data; } }
+    return data && typeof data === "object" && typeof data.sdp === "string"
+      ? { ...data, sdp: `<SDP, ${data.sdp.length} belgi>` }
+      : data;
+  }
+
+  function agentNotice(path, status, data) {
+    if (!agent.call && !agent.abort) return; // pagehide'dagi DELETE yoki tugagan qo'ng'iroq
+    const code = data && typeof data === "object" ? data.code : null;
+    if (path.endsWith("/candidates") && code === "voice_candidate_rejected") {
+      agentLine("sys", "agent candidate'ni rad etdi: " + (data.detail || "sababsiz") +
+        " — qo'ng'iroq qolgan candidate'lar bilan davom etadi");
+    } else if (path.endsWith("/candidates") && code === "voice_candidates_exhausted") {
+      agentLine("sys", "qo'ng'iroqning 64 candidate'i tugadi — qolganlari yuborilmaydi");
+    } else if (path.endsWith("/heartbeat") && (status === 0 || status >= 400) && status !== 404) {
+      agent.beatErrors += 1;
+      agentTick();
+    }
+  }
+
+  // ---- sozlama va hold
+  async function agentConfig(force) {
+    if (agent.cfg && !force) return agent.cfg;
+    agent.cfg = await api("GET", "/voice/config");
+    agentCfgRender();
+    return agent.cfg;
+  }
+
+  function agentCfgRender() {
+    const c = agent.cfg;
+    const urls = c.ice_servers.flatMap((s) => [].concat(s.urls || []));
+    const turn = urls.some((u) => /^turns?:/.test(u));
+    // TURN REST: username "<expiry>:<user_id>", server uni har GET /voice/config
+    // da shu foydalanuvchi uchun yangidan zarb qiladi. Muddati ko'rinsin — kalit emas.
+    const minted = c.ice_servers.map((s) => /^(\d{9,}):/.exec(s.username || "")).find(Boolean);
+    const expiry = minted ? new Date(Number(minted[1]) * 1000).toISOString() : null;
+    $("agentCfgKv").innerHTML =
+      `<span>mavjud</span><span><span class="pill ${c.available ? "ok" : "bad"}">` +
+        `${c.available ? "ha" : "yo'q — VOICE_AGENT_* sozlanmagan"}</span></span>` +
+      `<span>ICE</span><span>${urls.map(esc).join("<br>") || "—"} ` +
+        `<span class="pill ${turn ? "ok" : "no"}">${turn ? "TURN bor" : "TURN yo'q"}</span>` +
+        (expiry ? ` <span class="pill ok">vaqtinchalik · ${hhmmss(expiry)} UTC gacha</span>` : "") + `</span>` +
+      `<span>daqiqasi</span><span>${esc(c.per_minute || "narxlanmagan")}</span>` +
+      `<span>hold</span><span>${esc(c.hold)} · shift ${mmss(c.max_session_seconds)}</span>` +
+      `<span>heartbeat</span><span>har ${c.heartbeat_interval_seconds} s · ` +
+        `${c.heartbeat_timeout_seconds} s jimlikdan keyin server agentdan so'raydi</span>` +
+      `<span>liniya</span><span>bir vaqtda ${c.max_concurrent_calls} ta — tugatilgan, lekin ` +
+        `agentga hali ulangan qo'ng'iroq ham sanaladi</span>`;
+    agentHoldHint();
+  }
+
+  // GET /voice/config qo'ng'iroqdan *oldin* aytishi uchun bor: 402 ni tugma
+  // bosilgandan keyin emas, avval ko'rsatish. Tugmani esa to'smaydi — 402
+  // yo'lining o'zi ham sinaladigan narsa.
+  function agentHoldHint() {
+    const c = agent.cfg, w = store.wallet;
+    if (!c) return;
+    let html;
+    if (!c.available) {
+      html = `Server agentga ulanmagan — qo'ng'iroq <code>voice_agent_not_configured</code> bilan rad etiladi.`;
+    } else if (c.hold_micros == null) {
+      html = `<span class="neg">Narx yo'q</span> — <code>voice_agent</code> uchun price book qatori kerak: ` +
+        `<code>devtools/seed_price_book.py</code>.`;
+    } else if (agent.call) {
+      html = `Qo'ng'iroq davomida hold <code>reserved</code>da turadi — tugaganda ortig'i qaytadi.`;
+    } else if (!w) {
+      html = `Balans hali o'qilmagan — <code>/wallet</code>.`;
+    } else if (w.available_micros < c.hold_micros) {
+      html = `<span class="neg">Balans holddan kam:</span> ${esc(w.available)} &lt; ${esc(c.hold)} — ` +
+        `qo'ng'iroq 402 bilan rad etiladi, yetmayapti ${credits(c.hold_micros - w.available_micros)}. ` +
+        `<b>Admin</b> → kredit berish.`;
+    } else {
+      html = `Balans yetadi: ${esc(w.available)} ≥ hold ${esc(c.hold)}.`;
+    }
+    $("agentHoldHint").innerHTML = html;
+  }
+
+  // ---- holat, soat, suhbat
+  function agentSay(text, cls) {
+    const el = $("agentState");
+    el.textContent = text;
+    el.style.color = { err: "var(--err)", ok: "var(--ok)", warn: "var(--warn)" }[cls] || "";
+  }
+
+  function agentMuteLabel(muted) {
+    $("btnAgentMute").textContent = muted ? "mikrofonni yoqish" : "mikrofonni o'chirish";
+    $("btnAgentMute").classList.toggle("danger", muted);
+  }
+
+  function agentButtons(phase) { // "idle" | "connecting" | "live"
+    $("btnAgentStart").disabled = phase !== "idle";
+    $("btnAgentStop").disabled = phase === "idle";
+    $("btnAgentMute").disabled = phase !== "live";
+    if (phase !== "live") agentMuteLabel(false);
+  }
+
+  // Retry-After'li rad etish: holat qatori qancha kutishni sanab turadi. Tugma
+  // to'silmaydi — erta bosilgan urinishning rad etilishi ham sinaladigan narsa.
+  function agentRetryIn(code, seconds) {
+    clearInterval(agent.retry);
+    const until = Date.now() + seconds * 1000;
+    const show = () => {
+      const left = Math.ceil((until - Date.now()) / 1000);
+      if (left > 0) {
+        agentSay(`xato: ${code} · ${left} s dan keyin qayta urinib ko'ring`, "err");
+      } else {
+        agentSay(`xato: ${code} · endi qayta urinib ko'rsa bo'ladi`, "warn");
+        clearInterval(agent.retry);
+      }
+    };
+    show();
+    agent.retry = setInterval(show, 1000);
+  }
+
+  const AGENT_STATES = {
+    connecting: ["ulanmoqda… agent qayta ishga tushgan bo'lsa, birinchi javob 30 s gacha", ""],
+    connected: ["ulandi — gapiring", "ok"],
+    listening: ["siz gapiryapsiz", "ok"],
+    speaking: ["agent gapiryapti", "ok"],
+    idle: ["navbat sizda", "ok"],
+    ended: ["tugadi — hisob o'qilmoqda…", ""],
+  };
+
+  // `onEnd` ning ikkinchi argumenti. `cancelled` va `start_failed` onEnd bilan
+  // kelmaydi — boshlanmagan qo'ng'iroq xato bilan qaytadi — lekin hisob
+  // kartasida shu nomlar bilan ko'rinadi.
+  const AGENT_REASONS = {
+    hangup: "siz tugatdingiz",
+    server_stop: "server heartbeat'ga stop berdi — shift tugagan, qo'ng'iroq boshqa joydan tugatilgan yoki server uni yopgan",
+    max_duration: "shift tugadi — klientning o'z taymeri (serverning stop'i kelmadi)",
+    heartbeat_lost: "heartbeat timeout davomida birortasi o'tmadi — klient qo'ng'iroqni o'zi yopdi",
+    connection_lost: "media uzildi va 5 s ichida qaytmadi",
+    connection_failed: "media ulanmadi — turli tarmoqlarda TURN kerak",
+    agent_ended: "agent qo'ng'iroqni allaqachon yopgan (candidates → 409 voice_call_gone)",
+    not_found: "server bu qo'ng'iroqni tanimadi (404)",
+    cancelled: "ulanish paytida bekor qilindi",
+    start_failed: "boshlanmadi",
+  };
+
+  function agentState(state) {
+    if (state === "warning") {
+      // Modul buni bir marta aytadi va keyingi holat uni bosib ketadi —
+      // shuning uchun belgi alohida saqlanadi.
+      agent.warned = true;
+      toast("Shiftga 1 daqiqadan kam qoldi — keyin server qo'ng'iroqni o'zi yopadi");
+    } else {
+      agent.state = state;
+    }
+    const [text, cls] = AGENT_STATES[agent.state] || [agent.state, ""];
+    const warn = agent.warned && agent.state !== "ended";
+    agentSay(text + (warn ? " · shiftga 1 daqiqadan kam" : ""), warn ? "warn" : cls);
+    if (state === "connected") {
+      agent.connectedAt = performance.now();
+      agentLine("sys", "media ulandi · birinchi heartbeat — qo'ng'iroq endi pullik, javob paytidan boshlab");
+    } else if (state === "ended") {
+      agent.endedAt = performance.now();
+      agentTick();
+      clearInterval(agent.clock);
+    }
+  }
+
+  // `onHeartbeat`: har bir heartbeat javobi, `stop` ham. `elapsed_ms` — server
+  // soatida answered_at'dan beri, ya'ni aynan hisob yuradigan vaqt: soat shu
+  // nuqtaga bog'lanadi va keyingi heartbeat'gacha sahifa soatida yuradi.
+  function agentPulse(pulse) {
+    agent.beats += 1;
+    agent.lastBeat = performance.now();
+    agent.anchor = agent.lastBeat - pulse.elapsed_ms;
+    agent.action = pulse.action;
+    agent.remainingMs = pulse.remaining_ms;
+    agent.beatErrors = 0;
+    agentTick();
+  }
+
+  function agentTick() {
+    if (!agent.answeredAt) { $("agentClock").textContent = "javob kutilmoqda…"; return; }
+    const c = agent.cfg;
+    const now = agent.endedAt || performance.now();
+    // Birinchi heartbeat'gacha sahifa soati (javob kelgan payt), keyin server'niki.
+    const since = (now - (agent.anchor || agent.answeredAt)) / 1000;
+    const left = agent.lastBeat
+      ? (agent.remainingMs - (now - agent.lastBeat)) / 1000
+      : c.max_session_seconds - since;
+    let beat = agent.beats
+      ? `heartbeat ${agent.beats} · ${Math.round((now - agent.lastBeat) / 1000)} s oldin · ${agent.action}`
+      : agent.connectedAt ? "birinchi heartbeat yuborildi…" : "heartbeat hali yo'q — ulanmasa bepul";
+    // Modul oxirgi o'tgan heartbeat'dan (yoki ulanishdan) `timeout` o'tib
+    // qo'ng'iroqni o'zi yopadi — o'sha sanoq, faqat nimadir o'tmayotganda.
+    const lastOk = agent.lastBeat || agent.connectedAt;
+    if (!agent.endedAt && agent.beatErrors && lastOk) {
+      const lost = c.heartbeat_timeout_seconds - (now - lastOk) / 1000;
+      beat += ` · ${agent.beatErrors} tasi o'tmadi, ${Math.max(0, Math.ceil(lost))} s dan keyin heartbeat_lost`;
+    }
+    $("agentClock").textContent = `${mmss(since)} · qoldi ${mmss(Math.max(0, left))} · ${beat}`;
+  }
+
+  // Bir qo'ng'iroq 10 daqiqa — bir necha yuz gap. Undan ko'pi DOM'ni
+  // og'irlashtiradi va hech kim o'qimaydi.
+  const CHAT_MAX = 300;
+
+  // `textContent` bilan: agentning matni HTML emas, va u bizning nazoratimizda emas.
+  function agentLine(role, text, final = true) {
+    const chat = $("agentChat");
+    // Pastda turgan bo'lsa ergashadi; yuqoriga o'qish uchun chiqqan bo'lsa — tortmaydi.
+    const stick = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 40;
+    let el = role === "user" ? agent.partial : null;
+    if (!el) {
+      el = chat.appendChild(document.createElement("div"));
+      if (chat.children.length > CHAT_MAX) chat.firstElementChild.remove();
+    }
+    el.className = "msg " + role + (final ? "" : " partial");
+    el.textContent = text;
+    // Partial keyingisi bilan almashtiriladi; final qotadi va keyingi gap yangi pufak.
+    if (role === "user") agent.partial = final ? null : el;
+    if (stick) chat.scrollTop = chat.scrollHeight;
+  }
+
+  function agentEvent(message) {
+    agent.events += 1;
+    $("agentEvents").textContent = agent.events + " hodisa";
+    // Modul agent xatosini holatga aylantirmaydi, lekin u suhbatning bir qismi.
+    // `bot-interrupted` alohida qator emas: modul uzilgan gapni `interrupted`
+    // belgisi bilan transkriptga o'zi qo'shadi, va bu callback undan oldin
+    // chaqiriladi — qator gapdan oldin chiqib qolardi.
+    if (message.type === "error") {
+      const text = (message.data && message.data.message) || "noma'lum xato";
+      agentLine("sys", "agent xatosi: " + text);
+      toast("Agent: " + text, true);
+    }
+  }
+
+  // ---- boshlash va tugatish
+  async function agentStart() {
+    if (!store.access) { toast("Avval kiring", true); return; }
+    clearInterval(agent.retry);
+    const attempt = ++agent.attempt;
+    Object.assign(agent, {
+      offer: null, warned: false, state: "", partial: null, events: 0, before: null, id: null,
+      answeredAt: 0, connectedAt: 0, endedAt: 0, anchor: 0, beats: 0, lastBeat: 0, action: "",
+      remainingMs: 0, beatErrors: 0,
+    });
+    const controller = new AbortController();
+    agent.abort = controller;
+    agentButtons("connecting");
+    agentSay("tayyorlanmoqda…");
+    $("agentClock").textContent = "—";
+    try {
+      // Konfiguratsiya har safar yangidan: API boshqa sozlama bilan qayta ishga
+      // tushirilgan bo'lishi mumkin — xato yo'llarini aynan shunday sinaysiz — va
+      // TURN credential har javobda yangi, muddati bilan.
+      const [mod, cfg, before] = await Promise.all([agentModule(), agentConfig(true), walletNow()]);
+      // Shu orada bekor qilingan bo'lsa — mikrofon ruxsatini so'rab o'tirmaymiz.
+      if (controller.signal.aborted) throw new DOMException("bekor qilindi", "AbortError");
+      agent.before = before;
+      $("agentChatCard").style.display = "";
+      $("agentChat").innerHTML = "";
+      $("agentEvents").textContent = "";
+      $("agentBillCard").style.display = "none";
+      clearInterval(agent.clock);
+      agent.clock = setInterval(agentTick, 1000);
+
+      const call = await mod.startVoiceCall({
+        apiBase: store.base,
+        getToken: freshAccess,
+        audioElement: $("agentAudio"),
+        config: cfg,                  // modul uni qayta so'ramasin: bizniki logda allaqachon bor
+        signal: controller.signal,
+        fetch: agentFetch,
+        onState: agentState,
+        onHeartbeat: agentPulse,
+        // Uzilgan gap: agent boshlagan, foydalanuvchi gapirib bo'lgan — hammasi
+        // aytilmagan bo'lishi mumkin, shuning uchun belgilab ko'rsatiladi.
+        onTranscript: (t) => agentLine(t.role, t.interrupted ? t.text + " … (uzildi)" : t.text, t.final),
+        onEvent: agentEvent,
+        onEnd: (bill, reason) => { agentEnded(bill, reason).catch((e) => agentSay(String(e), "err")); },
+      });
+      agent.abort = null;
+      agent.id = call.id;
+      agent.answeredAt = performance.now();
+      if (call.ended) return; // onEnd allaqachon ishlagan
+      agent.call = call;
+      agentButtons("live");
+      agentHoldHint();
+      agentTick();
+      // Kutilmaydi: bu yerdagi xato ochiq qo'ng'iroqni "boshlanmadi" qilib ko'rsatmasin.
+      walletNow().catch(() => {}); // reserved endi hold'ga teng
+    } catch (e) {
+      agent.abort = null;
+      clearInterval(agent.clock);
+      agentButtons("idle");
+      await agentFailed(e, attempt);
+    }
+  }
+
+  // Ulanayotganda — signal, qolgani modulda. Offer yo'lda bo'lsa ham xavfsiz:
+  // modul POST'ni uzmaydi (uzilgan so'rovning qo'ng'irog'i serverda baribir
+  // ochilib, id'siz qolardi va heartbeat timeoutgacha liniyani band qilardi) —
+  // javob kelishi bilan uni o'zi DELETE qiladi va hold to'liq qaytadi.
+  function agentStop() {
+    if (agent.call) { agent.call.stop(); return; }
+    if (!agent.abort) return;
+    agentSay("bekor qilinmoqda…");
+    agent.abort.abort();
+  }
+
+  function agentErrorText(e) {
+    const d = (e && e.data) || {};
+    const code = (e && (e.code || d.code)) || "";
+    const later = e && e.retryAfter ? ` — ${e.retryAfter} s dan keyin qayta urinib ko'ring` : "";
+    if (e && e.status === 402) {
+      return `Kredit holdga yetmayapti: kerak ${credits(d.requiredMicros)}, ` +
+        `yetmayapti ${credits(d.shortfallMicros)} — Admin → kredit berish`;
+    }
+    switch (code) {
+      case "module_load_failed": return e.message;
+      case "insecure_origin":
+        return "Mikrofon faqat xavfsiz manzilda ishlaydi: https yoki localhost / 127.0.0.1 " +
+          "(LAN manzilda navigator.mediaDevices umuman yo'q)";
+      case "microphone_denied": return "Mikrofonga ruxsat berilmadi — manzil satridagi belgidan ruxsat bering va qayta bosing";
+      case "microphone_missing": return "Mikrofon topilmadi";
+      case "microphone_failed": return "Mikrofon ochilmadi: " + e.message;
+      case "voice_ice_config_invalid":
+        return "Brauzer ICE server sozlamasini qabul qilmadi (VOICE_AGENT_ICE_SERVERS / VOICE_AGENT_TURN_URLS): " + e.message;
+      case "voice_offer_no_video":
+        return "400 voice_offer_no_video — offerda video transceiver yo'q. Bu klient xatosi: voice-agent-client.js o'zgartirilganmi?";
+      case "validation_error":
+        return "422 — offer 64 KB dan katta yoki type \"offer\" emas. Bu ham klient xatosi: " + (d.detail || e.message);
+      case "voice_call_still_connected":
+        return "Oldingi qo'ng'iroq tugatilgan, lekin uning peer connection'i agentga hali ulangan — " +
+          "o'sha qo'ng'iroq ochiq turgan tab yoki ilovani yoping, keyin qayta bosing" + later;
+      case "voice_call_limit":
+        return "Hisobda ochiq qo'ng'iroq bor — uni tugating. Yopilgan tabniki bo'lsa, server uni " +
+          `heartbeatsiz ~${e.retryAfter || (agent.cfg && agent.cfg.heartbeat_timeout_seconds) || 45} s ichida o'zi yopadi`;
+      case "voice_call_rate_limited": return "Bir daqiqada juda ko'p qo'ng'iroq" + later;
+      case "voice_agent_busy": return "Agentning hamma liniyalari band (429)" + later;
+      case "voice_agent_unavailable": return "Agent hali ishga tushmoqda (503)" + later;
+      case "voice_agent_not_configured": return "Server agentga ulanmagan: VOICE_AGENT_BASE_URL va VOICE_AGENT_API_KEY bering";
+      case "voice_agent_misconfigured": return "Serverning VOICE_AGENT_ICE_SERVERS qiymati buzuq (503) — API logini qarang";
+      case "voice_agent_key_rejected": return "Agent serverimiz kalitini rad etdi — VOICE_AGENT_API_KEY noto'g'ri";
+      case "voice_agent_unreachable": return "Agentga yetib bo'lmadi — VOICE_AGENT_BASE_URL va agent ishlayotganini tekshiring";
+      case "voice_offer_rejected": return "Agent offerni rad etdi: " + e.message;
+      case "network_error": return "API'ga ulanib bo'lmadi — CORS_ORIGINS va sahifa portini tekshiring";
+      default:
+        return e && e.data ? describe(e.status, e.data) : "Qo'ng'iroq boshlanmadi: " + ((e && e.message) || e);
+    }
+  }
+
+  // Boshlanmagan urinish. Server qo'ng'iroqni ochib ulgurgan bo'lsa, modul uni
+  // DELETE qiladi — hisobni o'qib ko'rsatamiz: ulanmagan qo'ng'iroq bepul,
+  // hold → release, debit yo'q. Id ikki joydan keladi:
+  // - xatodan (`error.sessionId`) — modul qo'ng'iroqni ochgan-u, boshlay olmagan;
+  // - bekor qilinganda — offer javobidan. `AbortError` da `sessionId` yo'q, va
+  //   offer yo'lda bo'lsa modul xatoni darhol qaytaradi, DELETE'ni esa javob
+  //   kelgach, orqada yuboradi. Qaysi qo'ng'iroq bo'lganini boshqa hech narsa aytmaydi.
+  async function agentFailed(e, attempt) {
+    const cancelled = e && e.name === "AbortError";
+    const code = e && (e.code || (e.data && e.data.code));
+    const offered = agent.offer;
+    if (cancelled) {
+      agentSay("bekor qilindi");
+    } else {
+      toast(agentErrorText(e), true);
+      if (e && e.retryAfter) agentRetryIn(code, e.retryAfter);
+      else agentSay("xato: " + (code || (e && e.name) || "noma'lum"), "err");
+    }
+    $("agentClock").textContent = "—";
+    const answer = cancelled && offered ? await offered : null;
+    const id = (e && e.sessionId) || (answer && answer.ai_session_id) || null;
+    if (attempt !== agent.attempt) return; // javob kutilguncha yangi urinish boshlangan
+    if (id) {
+      if (cancelled) agentSay("bekor qilindi · agent javob bergan edi — modul qo'ng'iroqni DELETE qildi");
+      const bill = await agentSettled(id, attempt);
+      if (attempt !== agent.attempt) return;
+      agentBill(bill, cancelled ? "cancelled" : "start_failed");
+      await agentCheck(bill, null);
+    } else {
+      await walletNow().catch(() => {});
+    }
+    loadAgentCalls().catch(() => {});
+  }
+
+  // DELETE modulniki; bu yerda faqat u yetib borguncha kutiladi — orqadagi
+  // DELETE javob kelgach chorak soniya ichida ketadi.
+  async function agentSettled(id, attempt) {
+    let bill = null;
+    for (let i = 0; i < 20 && attempt === agent.attempt; i++) {
+      bill = await api("GET", "/voice/sessions/" + id).catch(() => null);
+      if (!bill || bill.status === "ended") break;
+      await sleep(500);
+    }
+    return bill;
+  }
+
+  async function agentEnded(bill, reason) {
+    clearInterval(agent.clock);
+    agent.call = null;
+    agent.partial = null;
+    agentButtons("idle");
+    agentHoldHint();
+    agentSay("tugadi · " + (AGENT_REASONS[reason] || reason), reason === "hangup" ? "ok" : "warn");
+    // DELETE o'tmagan bo'lsa bill null (`heartbeat_lost` da odatda shunday):
+    // qo'ng'iroqni server baribir o'zi yopadi, biz esa hozirgi holatini so'raymiz.
+    const id = (bill && bill.ai_session_id) || agent.id;
+    const shown = bill || (id ? await api("GET", "/voice/sessions/" + id).catch(() => null) : null);
+    agentBill(shown, reason);
+    await agentCheck(shown, reason);
+    loadAgentCalls().catch(() => {});
+  }
+
+  function agentBill(bill, reason) {
+    $("agentBillCard").style.display = "";
+    $("agentBillCheck").innerHTML = "";
+    if (!bill) {
+      $("agentBillKv").innerHTML = `<span>hisob</span><span>o'qilmadi — Qo'ng'iroqlar jadvalini yangilang</span>`;
+      return;
+    }
+    $("agentBillKv").innerHTML =
+      `<span>sessiya</span><span>${esc(bill.ai_session_id)}</span>` +
+      `<span>holat</span><span><span class="pill ${bill.status === "live" ? "no" : "ok"}">${esc(bill.status)}</span>` +
+        (reason ? ` · klient: ${esc(AGENT_REASONS[reason] || reason)}` : "") + `</span>` +
+      `<span>end_reason</span><span>${esc(bill.end_reason)}` +
+        (bill.disputed ? ` <span class="pill bad">disputed</span>` : "") + `</span>` +
+      `<span>ulandi</span><span>${bill.connected_at
+        ? hhmmss(bill.connected_at) : "yo'q — birinchi heartbeat bo'lmagan, bepul"}</span>` +
+      `<span>billed_ms</span><span>${bill.billed_ms} ms · ${mmss(bill.billed_ms / 1000)}</span>` +
+      `<span>narx</span><span>${esc(bill.price)}</span>` +
+      `<span>heartbeat</span><span>${bill.heartbeats}</span>` +
+      `<span>reserved</span><span class="${bill.reserved_micros ? "neg" : ""}">${credits(bill.reserved_micros)}</span>`;
+    if (bill.disputed) {
+      $("agentBillCheck").innerHTML =
+        `<div>Oxiri xabar qilinmagan, xulosa qilingan: heartbeat'lar to'xtagan va qo'ng'iroq oxirgi ` +
+        `tiriklik dalili (heartbeat yoki agentning "hali ushlab turibman" javobi) + bitta oraliqqacha ` +
+        `hisoblangan. Hisob so'roq qilinsa, birinchi qaraladigan joy.</div>`;
+    }
+  }
+
+  // Nutq yorlig'idagi ikki tekshiruvning o'zi, bitta qo'shimcha bilan: server
+  // heartbeat'dan hisoblagan davomiylik sahifa soati bilan qanchalik mos.
+  // Qo'shimchasi faqat "tugatish" bosilganda: boshqa har bir oxirda server
+  // sahifadan boshqa paytda to'xtagan (DELETE boshqa joydan, stop, timeout).
+  async function agentCheck(bill, reason) {
+    const before = agent.before;
+    agent.before = null;
+    const after = await walletNow().catch(() => null);
+    if (!bill || !before || !after || bill.status !== "ended") return;
+    const spent = before.available_micros - after.available_micros;
+    const okSpent = spent === bill.price_micros;
+    const okReserved = after.reserved_micros === 0;
+    const local = agent.answeredAt && agent.endedAt ? Math.round(agent.endedAt - agent.answeredAt) : null;
+    $("agentBillCheck").insertAdjacentHTML("beforeend",
+      `<div>hisobdan yechildi <b>${credits(spent)}</b>, narx <b>${esc(bill.price)}</b> ` +
+      `<span class="pill ${okSpent ? "ok" : "bad"}">${okSpent ? "mos" : "mos emas"}</span></div>` +
+      `<div>reserved <b>${esc(after.reserved)}</b> <span class="pill ${okReserved ? "ok" : "bad"}">` +
+      `${okReserved ? "qaytdi" : "qaytmadi"}</span></div>` +
+      (reason === "hangup" && local != null && bill.connected_at && !bill.disputed
+        ? `<div>sahifa soati ${local} ms, billed ${bill.billed_ms} ms — farq ${bill.billed_ms - local} ms ` +
+          `(ikki yo'nalishdagi tarmoq kechikishi va setRemoteDescription)</div>`
+        : ""));
+    if (!okSpent || !okReserved) toast("Pul harakati kutilganday emas — logni qarang", true);
+  }
+
+  // ---- tarix
+  async function loadAgentCalls(cursor) {
+    const data = await api("GET", "/voice/sessions", { query: { limit: 10, cursor } });
+    const html = table(["id", "vaqt", "holat", "billed", "narx", "hb", "sabab"], data.calls.map((c) => [
+      `<a href="#" data-call="${esc(c.ai_session_id)}" style="color:var(--accent)">${short(c.ai_session_id)}…</a>`,
+      hhmmss(c.created_at),
+      c.status === "live"
+        ? `<span class="pill no">live</span>`
+        : `<span class="pill ${c.connected_at ? "ok" : ""}">${c.connected_at ? "ulangan" : "ulanmagan"}</span>`,
+      mmss(c.billed_ms / 1000), esc(c.price), c.heartbeats,
+      esc(c.end_reason) + (c.disputed ? ` <span class="pill bad">disputed</span>` : ""),
+    ]));
+    if (cursor) $("agentCalls").insertAdjacentHTML("beforeend", html);
+    else $("agentCalls").innerHTML = html;
+    agent.cursor = data.page.next_cursor || "";
+    $("btnAgentCallsMore").disabled = !data.page.has_more;
+  }
+
+  $("agentCalls").addEventListener("click", (e) => {
+    const link = e.target.closest("a[data-call]");
+    if (!link) return;
+    e.preventDefault();
+    api("GET", "/voice/sessions/" + link.dataset.call).then((bill) => agentBill(bill, null)).catch(() => {});
+  });
+
+  // Yorliq birinchi ochilganda: modul oldindan yuklanadi (serve.py xatosi shu
+  // yerda ko'rinsin, tugma bosilganda emas), sozlama, tarix va balans o'qiladi.
+  // Balans ham: qo'ng'iroq paytida sahifa yangilansa, pagehide'dagi DELETE
+  // preflight'ni kutadi va yangi sahifaning ilk GET /wallet'i undan oldin
+  // javob oladi — hali qaytmagan hold bilan. Qo'ng'iroq yopilgach o'qilgani shu.
+  $("tabs").addEventListener("click", (e) => {
+    if (!e.target.closest("button[data-tab='agent']")) return;
+    agentModule().catch((err) => toast(err.message, true));
+    if (!store.access) return;
+    if (!agent.cfg) agentConfig().catch(() => {});
+    if (!$("agentCalls").innerHTML) {
+      loadAgentCalls().catch(() => {});
+      walletNow().catch(() => {});
+    }
+  });
+
+  // startVoiceCall klik ichidan: foydalanuvchi harakatisiz boshlangan
+  // qo'ng'iroqda brauzer agentning ovozini autoplay qoidasi bilan o'chiradi.
+  $("btnAgentStart").addEventListener("click", () => agentStart().catch((e) => agentSay(String(e), "err")));
+  $("btnAgentStop").addEventListener("click", agentStop);
+  $("btnAgentMute").addEventListener("click", () => {
+    if (!agent.call) return;
+    // Holat modulniki (`call.muted` — treklarning o'zidan): tugma yozuvi undan o'qiladi.
+    agent.call.mute(!agent.call.muted);
+    agentMuteLabel(agent.call.muted);
+  });
+  on("btnAgentConfig", () => agentConfig(true));
+  // Balans bilan birga: DELETE yetib bormagan qo'ng'iroqni (`heartbeat_lost`,
+  // yopilgan tab) server keyinroq o'zi yopadi, va hold o'shanda qaytadi.
+  on("btnAgentCalls", () => Promise.all([loadAgentCalls(), walletNow()]));
+  on("btnAgentCallsMore", () => loadAgentCalls(agent.cursor));
 
   // ------------------------------------------------------------ usage
   on("btnUsage", async () => {

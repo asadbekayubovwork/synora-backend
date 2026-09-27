@@ -87,12 +87,19 @@ All under `/api/v1`.
 | `GET`  | `/stt/transcriptions` | Every transcription this account has kept |
 | `GET`  | `/stt/transcriptions/{id}/audio` | The audio that was uploaded |
 | `DELETE` | `/stt/transcriptions/{id}` | Erase one |
+| `GET`  | `/voice/config` | ICE servers, heartbeat cadence, and what a call costs — the hold included |
+| `POST` | `/voice/sessions` | Start a voice call: the browser's SDP offer in, the agent's answer out. Holds the ceiling |
+| `POST` | `/voice/sessions/{id}/candidates` | Relay the browser's ICE candidates to the agent, batched |
+| `POST` | `/voice/sessions/{id}/heartbeat` | Every 15 s while connected — the meter. `continue`, `warn` or `stop` |
+| `DELETE` | `/voice/sessions/{id}` | Hang up. Billed answer to now, hold released |
+| `GET`  | `/voice/sessions` | Every call this account has placed, cursor-paginated |
+| `GET`  | `/voice/sessions/{id}` | One call and its bill |
 | `GET`  | `/usage` | Your own consumption, by service and metric |
 | `GET`  | `/admin/wallets/{user_id}` | Any user's balance (superuser) |
 | `POST` | `/admin/wallets/{user_id}/credits` | Grant credit by hand (superuser) |
 | `POST` | `/admin/wallets/{user_id}/freeze` | Put a wallet on hold (superuser) |
 | `POST` | `/admin/wallets/{user_id}/unfreeze` | Take it off hold (superuser) |
-| `POST` | `/admin/reconcile` | Check every wallet against its ledger, finish batch jobs past their deadline, and release stranded holds (superuser) |
+| `POST` | `/admin/reconcile` | Check every wallet against its ledger, finish batch jobs past their deadline, settle voice calls nobody hung up, and release stranded holds (superuser) |
 
 The AI microservices talk to a separate surface, **not** under `/api/v1`:
 
@@ -470,6 +477,7 @@ topology and the worker's runbook.
 | | |
 | --- | --- |
 | [docs/STT.md](docs/STT.md) | Transcription: the one route, why the hold is an estimate and the charge is not, the error table |
+| [docs/VOICE_AGENT.md](docs/VOICE_AGENT.md) | Voice calls: the signalling sequence, every route, billing on the heartbeat and the agent's liveness answer, the data-channel events, the error table, the browser client and how to wire it into Nuxt, and what was verified against the live agent |
 | [docs/TTS.md](docs/TTS.md) | The integration contract: every route with a curl example, what is billed and when, the `402` shape, the error-code table |
 | [Trying it locally](docs/TTS.md#trying-it-locally) | Zero to a synthesis you paid for: a throwaway database, a funded account, and what each response should say |
 | [docs/QUEUEING.md](docs/QUEUEING.md) | Where RabbitMQ is used, where it is refused, and how to run the worker |
@@ -663,6 +671,70 @@ and the connection fee is what covers a GPU slot held in it.
 The whole contract, with the protocol and the error table:
 [docs/STT.md](docs/STT.md).
 
+## Voice calls
+
+The third gateway, and the first one the audio does not pass through. The
+voice agent speaks WebRTC, so the browser and the agent exchange audio
+directly; what comes through us is the negotiation — the SDP offer, its answer,
+the ICE candidates — with the agent's key attached here, so it never reaches a
+browser. That key is the agent's `ui` roster entry, never its `admin` one.
+
+```bash
+curl -s "$API/voice/config" -H "$A"
+# → {"available":true,"ice_servers":[…],"heartbeat_interval_seconds":15,
+#    "max_session_seconds":600,"per_minute":"0.500000","hold":"5.000000", …}
+```
+
+Billed by wall clock on `session_ms`, and **the client's heartbeat is the
+meter**: nothing on this side sees the media or the call ending, so a connected
+client posts `…/heartbeat` every fifteen seconds and the call is billed from
+the agent's answer to the hang-up. The one check on that meter is a question
+the agent will answer — an empty `PATCH /api/offer` is a no-op on a call it
+holds and a `404` on one it has dropped — so a client that goes quiet is asked
+about rather than believed: a call the agent still holds is kept and billed on,
+and one it has let go of is billed to its last proof of life plus an interval
+and flagged `disputed`. A call that never connected costs nothing — and since
+"the agent still holds it" can also mean ICE is still failing, a call that never
+heartbeats is *nudged* with one unroutable ICE candidate, which fails any peer
+stuck in checking, and billed from its answer only if the agent still holds it
+90 seconds after the nudge and 120 after the answer. The answer is only acted on
+once the agent has 404'd a call id that cannot exist — the live agent does — and
+an agent that does not is billed on heartbeats alone. Credit for the whole
+ten-minute ceiling is held when the call opens — the same bounded one-shot the
+live transcription is — and a sweep in every process settles the calls nobody
+hung up.
+
+A hang-up does not free the line while the agent still holds the old
+connection — the next start is refused `429 voice_call_still_connected` until
+the tab or app holding it closes it — so one account can never occupy more of
+the shared agent than its line cap, whatever its client does after `DELETE`.
+A call that never connected does not hold the line, so a retry right after a
+failed connect always works. TURN credentials are minted
+per user when `VOICE_AGENT_TURN_URLS` and `VOICE_AGENT_TURN_SECRET` are set,
+so one copied out of `GET /voice/config` stops working about when its call
+could no longer be running.
+
+The agent guide's three silent failures — the video transceiver an audio call
+still has to negotiate, the data channel only the client can create, the `ping`
+it must send every second — come down to one refusal and one file.
+`POST /voice/sessions` answers `400 voice_offer_no_video` to the first, before
+anything is held; `dev-ui/voice-agent-client.js`, a dependency-free browser
+module, does all three and the heartbeat besides — and keeps the sentence the
+agent was cut off in when the user talks over it, which the agent never marks
+`completed`.
+
+No agent needed to try it: `dev-ui/fake_voice_agent.py` serves the agent's
+routes on `:8200`, 404s a call it does not hold and drops a peer that has not
+connected a minute after its offer, as the live agent does, and with `aiortc`
+installed it is a real WebRTC peer that echoes the microphone back.
+`dev-ui/voice_call.py` places a call through the API from the terminal —
+`--events` prints every data-channel event, `--no-heartbeat` is the abuse test.
+
+The whole contract — the sequence, every route, the billing rules, the liveness
+probe and the nudge, the data-channel events, the error table, the Nuxt wiring,
+what was verified against the live agent, and the limitation that remains:
+[docs/VOICE_AGENT.md](docs/VOICE_AGENT.md).
+
 ## The Nuxt frontend
 
 `Synora-frontend` is already wired to this API. The browser calls it directly —
@@ -762,6 +834,11 @@ Everything lives in `.env`; see [.env.example](.env.example) for the full list.
 | `TTS_BASE_URL` / `TTS_API_KEY` | unset | Unset ⇒ every `/tts` route answers `503`. One without the other is refused at boot. Full list in [docs/TTS.md](docs/TTS.md#configuration) |
 | `STT_STREAM_MAX_SECONDS` / `STT_STREAM_IDLE_SECONDS` | `600` / `60` | The cap on one live socket — and the size of its up-front hold — and how long it may stay silent |
 | `STT_BASE_URL` / `STT_API_KEY` | unset | Unset ⇒ `/stt/transcribe` answers `503`. Sent as `X-Token`, not `X-API-Key`. Full list in [docs/STT.md](docs/STT.md#configuration) |
+| `VOICE_AGENT_BASE_URL` / `VOICE_AGENT_API_KEY` | unset | Unset ⇒ `POST /voice/sessions` answers `503` and `GET /voice/config` says `available: false`. The key is the agent's `ui` roster entry, never `admin`. One without the other is refused at boot. Full list in [docs/VOICE_AGENT.md](docs/VOICE_AGENT.md#configuration) |
+| `VOICE_AGENT_MAX_SESSION_SECONDS` / `VOICE_AGENT_HEARTBEAT_SECONDS` | `600` / `15` | The cap on one call — and the size of its up-front hold — and how often a connected client must say it is still up |
+| `VOICE_AGENT_OFFER_TIMEOUT_SECONDS` | `35` | The agent's warm-up allowance. With the 10 s connect timeout the offer can take 45 s, and the checks before it seconds more: give nginx's `location /api/v1/voice/` `proxy_read_timeout 90s` |
+| `VOICE_AGENT_MAX_OPENS_PER_MINUTE` | `10` | Calls an account may start a minute, counted in the database. With Redis, attempts are throttled too, at three times this and never below 30. At least 1 outside development |
+| `VOICE_AGENT_TURN_URLS` / `VOICE_AGENT_TURN_SECRET` | unset | TURN credentials minted per user in `GET /voice/config` (coturn `use-auth-secret`). One without the other is refused at boot |
 | `RECORDINGS_ENABLED` / `RECORDINGS_DIR` | `true` / `data/recordings` | Keep the text and the audio of every delivered synthesis. `false` keeps neither |
 | `METRICS_ENABLED` / `METRICS_TOKEN` | `true` / unset | `GET /metrics`. Outside development it answers `404` until a token is set — nginx proxies `location /`, so the endpoint is public the moment it exists |
 | `RABBITMQ_URL` | unset | Unset ⇒ batch jobs are submitted inline and polled when read. See [docs/QUEUEING.md](docs/QUEUEING.md) |
@@ -861,7 +938,7 @@ app/
 │   ├── cache.py         Redis, and the Postgres-shaped hole where Redis isn't
 │   └── broker.py        RabbitMQ, or nothing: admission control for one GPU
 ├── db/                  Declarative base, naming convention, async session
-├── models/              User, OtpCode, OAuthAccount, billing tables, tts jobs
+├── models/              User, OtpCode, OAuthAccount, billing tables, tts jobs, voice calls
 ├── schemas/             Request/response models (also the Swagger examples)
 │   └── common.py        The cursor-pagination convention
 ├── services/
@@ -878,6 +955,10 @@ app/
 │   │   ├── stt_stream_client.py The same box's websocket
 │   │   ├── stt_stream_service.py A live session: hold the ceiling, relay, settle
 │   │   ├── stt_service.py       Estimate, hold, transcribe, settle
+│   │   ├── voice_agent_client.py  The voice agent's signalling, and asking it whether a call is up. No money
+│   │   ├── voice_agent_service.py A call's requests: hold the ceiling, relay, take the heartbeat
+│   │   ├── voice_call_lifecycle.py When a call is over and what it costs: probe, keep, settle, sweep
+│   │   ├── voice_call_reads.py     A call, a page of calls, and /voice/config (TURN minted per user)
 │   │   ├── tts_client.py        The speech box, and nothing else. No money
 │   │   ├── tts_service.py       One metered stream: hold, relay, settle
 │   │   └── tts_batch_service.py A job, its hold and its settlement
@@ -896,6 +977,7 @@ app/
 │       ├── wallet.py    Balance and statement
 │       ├── tts.py       Speech: the metered stream, voices, batch jobs
 │       ├── stt.py       Transcription: one metered upload
+│       ├── voice.py     Voice calls: signalling through us, audio straight to the agent
 │       ├── usage.py     What this account consumed, from our own rows
 │       └── admin.py     Superuser-only money routes
 └── workers/             Processes that are not the API. All of them optional
@@ -903,6 +985,7 @@ app/
 docs/
 ├── INTERNAL_API.md      The contract the AI microservices code against
 ├── TTS.md               The speech contract: routes, billing, errors
+├── VOICE_AGENT.md       The voice-call contract: sequence, billing, errors, browser client
 └── QUEUEING.md          Where RabbitMQ is used, and where it deliberately isn't
 dev-ui/                  One HTML file that drives every route from a browser
 grafana/                 Prometheus + Grafana, provisioned from files
@@ -1015,6 +1098,26 @@ start.
   time the tunnel restarts. A changed URL is `502 tts_unreachable` on every
   synthesis, with nothing wrong on either box. A real DNS name and a persistent
   tunnel — or the GPU box behind our own nginx — before anyone depends on it.
+  The voice agent is reached the same way today, and a moved tunnel there is
+  `502 voice_agent_unreachable` on every call.
+- **A voice call hung up by `DELETE` can keep talking.** The audio never
+  passes through us and the agent has no route to end a call, so a client that
+  hangs up and leaves its peer connection open is billed to the `DELETE` while
+  the agent serves it on. Asking the agent whether it still holds a call closes
+  the other two ways round the meter — a client that stops heartbeating is kept
+  and billed while the call is up, and one that never starts is billed from its
+  answer once it has outlived the nudge — and bounds this one to a line per
+  account, because a hung-up call the agent still holds keeps its line busy.
+  What stays free is what an ICE failure looks like: a call that never
+  heartbeats and closes within about two minutes of its answer. All of that
+  rests on the agent answering `404` for a call it does not hold, which is
+  observed behaviour rather than a promise in its guide — verified against the
+  live agent — and an agent that stops doing it is billed on heartbeats alone.
+  The fix is on the
+  agent's side: a session ceiling of its own at or below ours, or usage reported
+  over the signed internal API.
+  [docs/VOICE_AGENT.md](docs/VOICE_AGENT.md#known-limitation-a-hang-up-that-leaves-the-call-running)
+  has the detail and what to watch meanwhile.
 - **Nothing runs `POST /admin/reconcile` on a schedule.** It is the only caller
   of the session reaper, and the reaper is what gives back a hold left behind by
   a process that died between placing it and settling — a client gone before the
@@ -1025,7 +1128,10 @@ start.
   customer's credit is frozen the whole time. Until it is on a timer — a cron
   calling the route, or an in-process job behind the same Redis lease
   `WORKER_COUNT > 1` already needs — "run it after anything unusual" is the only
-  policy there is, and nobody knows when something unusual happened.
+  policy there is, and nobody knows when something unusual happened. Voice
+  calls are the one exception: their sweep also runs in-process every
+  `VOICE_AGENT_SWEEP_SECONDS`, so a call nobody hung up is billed without
+  waiting for this.
 - **The batch sweeper exists; nothing puts it on a timer.**
   `TTS_BATCH_MAX_POLL_SECONDS` used to be reachable only from
   `tts_batch_service.refresh_job` — a worker's poll, or a read of
@@ -1130,8 +1236,18 @@ start.
   own: `tts_batch_service.sweep_stale_jobs` finishes jobs past their *own*
   deadline, reported as `swept`, and it is called from the route beside
   `reconcile_all` rather than from inside it so that the billing layer never
-  imports the AI services. What is left in **Still to do** is the timer both
-  passes are waiting on.
+  imports the AI services. Voice calls are a third exclusion, and the sharpest:
+  the reaper's rule — past its deadline, billed at its estimate — would charge a
+  tab that crashed ten seconds in the whole ten-minute ceiling, so it stands off
+  every session with a `voice_calls` row, and the route runs
+  `voice_agent_service.sweep` first instead. That pass asks the agent about
+  each call whose heartbeat stopped and keeps the ones it still holds; the rest
+  it bills to their last proof of life — or releases at zero if they never
+  connected — and reports as `voice_ended`. It also releases, at zero, a voice
+  hold whose call row was never written, which the reaper recognises by its
+  idempotency key and leaves alone for the same reason. What is left in
+  **Still to do** is the timer the first two passes are waiting on; the voice
+  sweep also runs in-process.
 - **A write-off is not on the ledger.** When a live call overruns into grace,
   the uncollected part lands on `wallets.lifetime_writeoff_micros` and writes
   no entry, because no credit moved. It is the one denormalised counter

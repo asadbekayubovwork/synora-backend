@@ -2271,6 +2271,596 @@
           "sort": "desc"
         }
       }
+    },
+    {
+      "type": "row",
+      "title": "Voice agent",
+      "id": 36,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 85
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Calls in progress",
+      "id": 37,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "Voice calls not yet settled: talking, or gone quiet and not yet decided. Read from `voice_calls` at scrape time, because a call outlives the process that opened it. A floor that climbs on a quiet night is calls nobody is settling \u2014 check that the in-process sweep is running (`VOICE_AGENT_SWEEP_SECONDS`).",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 86
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "synora_voice_calls_live",
+          "legendFormat": "in progress",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Calls per minute, by how they ended",
+      "id": 38,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "`connected yes` is a billed call: `client_hangup` is someone pressing Stop, `heartbeat_timeout` a call that went quiet and that the agent no longer held \u2014 billed to its last heartbeat plus one interval and flagged `disputed` \u2014 and `max_duration` the ceiling. `connected no` is a call the agent answered whose media never came up; it cost nothing, and a steady stream of those is the agent guide's \"works locally, not from another network\" \u2014 the fix is TURN. `connected unanswered` is an offer the agent refused or never answered: an agent problem, not a network one \u2014 see the failures panel. Every combination is exported at zero from process start, so the first one after a restart is counted too; `> 0` keeps the quiet ones out of the legend.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 86
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (end_reason, connected) (rate(synora_voice_calls_total[5m]) * 60) > 0",
+          "legendFormat": "{{end_reason}} \u00b7 connected {{connected}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 18,
+            "showPoints": "auto",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Conversation billed per minute",
+      "id": 39,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "Seconds of conversation the wallets were charged for, first heartbeat to hang-up and capped at the ceiling \u2014 not answer to hang-up: ICE through two NATs was measured at over thirty seconds, and that silence is not billed. The counter moves when a call settles, by the whole call at once, so a long call shows up after it ends; for how many are in progress, read \"Calls in progress\".",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 86
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "rate(synora_voice_call_seconds_total[5m]) * 60",
+          "legendFormat": "seconds billed",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Agent latency \u2014 offer, relays and probes",
+      "id": 40,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "The offer is answered once the agent has built the call's pipeline: six to eight seconds against the live agent, up to the 45-second deadline on a cold start. Candidate relays and liveness probes are one round trip through the tunnel and belong well under a second \u2014 when they climb, so does the time every open spends checking the line before its offer.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 93
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(synora_voice_upstream_seconds_bucket{operation=\"offer\"}[5m])))",
+          "legendFormat": "offer p50",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(synora_voice_upstream_seconds_bucket{operation=\"offer\"}[5m])))",
+          "legendFormat": "offer p95",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, operation) (rate(synora_voice_upstream_seconds_bucket{operation=~\"candidates|probe\"}[5m])))",
+          "legendFormat": "{{operation}} p95",
+          "range": true,
+          "instant": false,
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Agent failures per minute, by operation and code",
+      "id": 41,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "`voice_agent_key_rejected` is our own `ui` key and is logged at ERROR \u2014 somebody rotated it. `voice_agent_unreachable` on every operation at once is almost always the tunnel: its URL changes each time it restarts, and `VOICE_AGENT_BASE_URL` has to follow. `voice_agent_busy` is the agent's own ceiling on concurrent calls. `voice_offer_rejected` and `voice_candidate_rejected` are the caller's SDP and candidates, not an incident. Every combination is exported at zero from process start, so the first one after a restart is counted too; `> 0` keeps the quiet ones out of the legend.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 93
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (operation, code) (rate(synora_voice_upstream_errors_total[5m]) * 60) > 0",
+          "legendFormat": "{{operation}} \u00b7 {{code}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 18,
+            "showPoints": "auto",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Liveness probes and nudges per minute",
+      "id": 42,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "A probe asks the agent whether it still holds a call: one whose client went quiet, or one hung up a moment ago that may still be connected. `unknown` means a real probe could not get an answer. The canary \u2014 a probe of a `pc_id` that cannot exist, which decides whether the agent's answers are believed \u2014 is counted apart: `canary_untrusted` means they are not, and billing has fallen back to heartbeats alone. A nudge is the unroutable candidate sent to a call that never heartbeated; `refused` above zero means this agent will not take it, and such calls then stay unbilled.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 93
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (result) (rate(synora_voice_probes_total[5m]) * 60)",
+          "legendFormat": "probe \u00b7 {{result}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum by (result) (rate(synora_voice_nudges_total[5m]) * 60)",
+          "legendFormat": "nudge \u00b7 {{result}}",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Quiet spells kept on the agent's word, per hour",
+      "id": 43,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "A connected call whose client stopped heartbeating while the agent still held it \u2014 kept and billed on rather than ended at a bill the client chose by going silent \u2014 counted once per silence, not once per re-check; plus a never-heartbeated call the moment it proves it connected. A few is a network that reaches the agent and not us. A steady climb is somebody finding out what a silent client gets them; each call id is on a `voice_call_kept` WARNING line.",
+      "gridPos": {
+        "h": 7,
+        "w": 16,
+        "x": 0,
+        "y": 100
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(synora_voice_calls_kept_total[1h]))",
+          "legendFormat": "kept",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Calls that never connected (1h)",
+      "id": 44,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "synora-prom"
+      },
+      "description": "Share of the last hour's answered calls whose media never came up. They cost nothing, but each is a user who pressed the button and heard nothing. Above a few percent is ICE failing across networks \u2014 configure TURN (`VOICE_AGENT_TURN_*`) \u2014 or a client that stopped negotiating the video transceiver or the data channel. Offers the agent refused or never answered are left out on purpose: an agent that is down or full is the failures panel's to show, and counted here it would send you looking for a TURN server. Zero calls reads as zero, not \"No data\".",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 100
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "synora-prom"
+          },
+          "editorMode": "code",
+          "expr": "(sum(increase(synora_voice_calls_total{connected=\"no\"}[1h])) or vector(0)) / clamp_min(sum(increase(synora_voice_calls_total{connected=~\"yes|no\"}[1h])) or vector(0), 1)",
+          "legendFormat": "never connected",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.05
+              },
+              {
+                "color": "red",
+                "value": 0.2
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
     }
   ],
   "annotations": {

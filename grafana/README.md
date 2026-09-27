@@ -23,15 +23,32 @@ Grafana'ngiz bo'ladi va u xuddi shu `/metrics` ga `METRICS_TOKEN` bilan boradi.
 
 ## Dashboard nimani ko'rsatadi
 
-Beshta qator: **Traffic**, **Speech**, **Money**, **Sessions/jobs/process** va
-**Batch outcomes and reconciliation**. Har bir panelning tavsifi (`i` belgisi)
-raqam nimani anglatishini aytadi. Eng foydali uchtasi:
+Yettita qator: **Traffic**, **Speech**, **Money**, **Sessions/jobs/process**,
+**Batch outcomes and reconciliation**, **Transcription** va **Voice agent**. Har
+bir panelning tavsifi (`i` belgisi) raqam nimani anglatishini aytadi. Eng
+foydali uchtasi:
 
 | Panel | Nega muhim |
 | --- | --- |
 | **Held right now** | Sessiyalarga band qilingan kredit. Chaqiruvlar paytida ko'tarilib, keyin tushishi kerak. Tinch tunda pastki chegarasi o'sib borsa — qaytmagan hold, va `POST /admin/reconcile` uni tiklaydi |
 | **Ledger divergence** | Balansi o'z ledgeri bilan mos kelmagan hisoblar. Bu yerdagi noldan katta har qanday qiymat alert'ga arziydi |
 | **Syntheses by outcome** | `billed` / `free` / `replay`. `free` ning o'sishi — upstream birinchi baytdan oldin rad etayotgani; `replay` ning o'sishi — mijoz idempotency kalitini qayta yuborayotgani |
+
+### Voice agent qatori
+
+| Panel | Nega muhim |
+| --- | --- |
+| **Calls in progress** | Hali hisoblanmagan qo'ng'iroqlar, bazadan scrape paytida o'qiladi. Tinch tunda pastki chegarasi o'sib borsa — hech kim yopmayotgan qo'ng'iroqlar: sweeper ishlayaptimi (`VOICE_AGENT_SWEEP_SECONDS`) |
+| **Calls per minute, by how they ended** | `connected yes` — hisoblangan; `no` — agent javob bergan, lekin media ulanmagan (TURN kerak); `unanswered` — agent offerni rad etgan yoki javob bermagan (agent muammosi, xatolar panelini qarang) |
+| **Calls that never connected (1h)** | Javob berilgan qo'ng'iroqlardan media ulanmaganlari ulushi. Bir necha foizdan yuqorisi — turli tarmoqlar orasida ICE o'tmayapti, TURN sozlang (`VOICE_AGENT_TURN_*`) |
+| **Agent failures** | `voice_agent_unreachable` hamma operatsiyada birdan — deyarli har doim tunnel manzili o'zgargani: `VOICE_AGENT_BASE_URL` ni yangilang |
+| **Liveness probes and nudges** | `canary_untrusted` — agent javoblariga ishonilmayapti, hisob faqat heartbeat bo'yicha; nudge `refused` — heartbeat'siz qo'ng'iroqlar hisoblanmay qoladi |
+| **Quiet spells kept on the agent's word** | Heartbeat to'xtagan, lekin agent tasdiqlagan qo'ng'iroqlar — tarmoq, xato yoki suiiste'mol; har birining id'si `voice_call_kept` WARNING logida |
+
+Voice hodisalari kam, shuning uchun hamma yorliq kombinatsiyalari jarayon
+boshidan nol bilan eksport qilinadi — aks holda Prometheus har yorliqning
+birinchi hodisasini `rate()`da ko'rmay qolardi — va bu panellarda siyrak
+nuqtalar ham chiziladi (`showPoints: auto`).
 
 ## Metrikalar qayerdan keladi
 
@@ -41,10 +58,11 @@ tugaganini biladi, `settle_oneshot` qancha yechilganini biladi. Sabablari va
 qoidalari (yorliqlar cheklovi, micros butun son bo'lib qolishi, bitta worker
 sharti) `app/core/metrics.py` ning boshida yozilgan.
 
-Faqat to'rtta ko'rsatkichni hisoblagich bila olmaydi — band kredit, ochiq
-sessiyalar, ochiq batch joblari va hisoblardagi qoldiq. Ular jarayon qayta
+Faqat beshta ko'rsatkichni hisoblagich bila olmaydi — band kredit, ochiq
+sessiyalar, ochiq batch joblari, hisoblardagi qoldiq va davom etayotgan voice
+qo'ng'iroqlar. Ular jarayon qayta
 ishga tushganda ham saqlanadi va satrlar yig'indisi bo'ladi, shuning uchun
-`refresh_db_gauges` ularni scrape paytida uchta agregat so'rov bilan o'qiydi.
+`refresh_db_gauges` ularni scrape paytida to'rtta kichik agregat so'rov bilan o'qiydi.
 `METRICS_DB_GAUGES=false` buni o'chiradi.
 
 ## Ishlab chiqarishda

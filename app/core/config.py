@@ -1,3 +1,4 @@
+import json
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -196,6 +197,83 @@ class Settings(BaseSettings):
     # A peer with anything left to send sends it in well under this.
     stt_stream_drain_seconds: int = 15
 
+    # --- Voice agent -------------------------------------------------------
+    # The third gateway, and the first one the media does not pass through.
+    # The agent speaks WebRTC: the browser and the agent exchange audio
+    # directly over UDP, and what reaches us is only the signalling — the SDP
+    # offer, the answer, and the ICE candidates. So we sit exactly where the
+    # agent team's own guide says a backend should: between the browser and
+    # `POST/PATCH /api/offer`, adding the key server-side. The key is the
+    # agent's `ui` roster entry and it never reaches a browser; see
+    # `app/services/ai/voice_agent_service.py` for what that costs in billing.
+    # Empty base url or key means every `/voice` route answers 503.
+    voice_agent_base_url: str = ""
+    voice_agent_api_key: str = ""
+    # The price book row a call bills against, beside service `voice_agent`.
+    # Only `session_ms` is ever reported: the agent is a black box that counts
+    # nothing for us, so the per-minute price on that row has to be the whole
+    # price of a minute of conversation, not a connection fee on top of
+    # components nobody reports.
+    voice_agent_model_key: str = "synora-voice-agent"
+    voice_agent_connect_timeout_seconds: float = 10.0
+    # The offer is answered once the agent has built a pipeline for the call,
+    # and the agent's own guide says the first one after a restart can take
+    # up to thirty seconds of warm-up. Anything shorter turns every cold start
+    # into a 502 the user retries into a second cold start. Thirty-five, not
+    # more, because this and the connect budget are the whole deadline, the
+    # sweep and liveness checks before the offer can take a few seconds more,
+    # and nginx's default `proxy_read_timeout` is sixty: an offer the proxy
+    # gives up on is a call the agent answered and the browser never heard
+    # about. Give `location /api/v1/voice/` a longer proxy timeout regardless.
+    voice_agent_offer_timeout_seconds: float = 35.0
+    # The ceiling on one call and what its hold is priced from, for the reason
+    # `stt_stream_max_seconds` is: there is no hold extension, so the cap is
+    # both the reservation and the limit.
+    voice_agent_max_session_seconds: int = 600
+    # How often a client proves its call is still up, and how long it may go
+    # quiet before the call is treated as over. We never see the media, so this
+    # heartbeat is the client's evidence of how long a call lasted, and a call
+    # that goes quiet for the timeout is billed to its last beat plus one
+    # interval. Three intervals rather than one, because a phone switching from
+    # wifi to mobile loses a request or two without the call dropping — and the
+    # reference client retries inside that window rather than waiting a whole
+    # interval, so one lost beat never ends a call.
+    voice_agent_heartbeat_seconds: int = 15
+    voice_agent_heartbeat_timeout_seconds: int = 45
+    # Live calls per user. Counted in the database rather than in Redis — a call
+    # outlives the request that opened it, so there is no request scope to hang
+    # a Redis slot on, and the rows are already the truth about what is live.
+    voice_agent_max_concurrent_per_user: int = 1
+    # Calls a user may *open* per minute, live or not. A call is cheap to open
+    # and expensive for the agent to build a pipeline for, and a client stuck in
+    # a reconnect loop is the likeliest way to learn that. Counted from the
+    # `voice_calls` rows themselves, so unlike the Redis throttles it is on
+    # whether or not there is a Redis.
+    voice_agent_max_opens_per_minute: int = 10
+    # Handed to the browser verbatim for `new RTCPeerConnection({iceServers})`.
+    # JSON, because a TURN entry carries `username` and `credential` beside its
+    # URLs. STUN alone is enough on a LAN and behind most home routers; the
+    # agent's guide is explicit that anything past that — a call that works
+    # locally and not from another network — needs TURN, and that is this line.
+    voice_agent_ice_servers: str = '[{"urls": ["stun:stun.l.google.com:19302"]}]'
+    # TURN, with credentials minted per user rather than written down — the
+    # "TURN REST" scheme coturn implements as `use-auth-secret`: a username
+    # that is an expiry and a user id, and a password that is an HMAC of it
+    # under a secret the TURN server shares. A static `username`/`credential`
+    # in VOICE_AGENT_ICE_SERVERS works too, and hands every signed-in account a
+    # relay password that never expires; this is the version that does.
+    # Comma separated URLs, e.g. `turn:turn.example.com:3478?transport=udp`.
+    voice_agent_turn_urls: str = ""
+    voice_agent_turn_secret: str = ""
+    # How long a minted TURN credential lasts. Zero means the call ceiling plus
+    # ten minutes: long enough for any call, short enough to be useless later.
+    voice_agent_turn_ttl_seconds: int = 0
+    # How often this process looks for calls whose heartbeat stopped and bills
+    # them. A crashed tab reserves a whole call's ceiling until something
+    # settles it; without this that something is the user's next call or an
+    # admin's reconcile. Zero turns the loop off.
+    voice_agent_sweep_seconds: int = 30
+
     # --- Recordings --------------------------------------------------------
     # Keep every delivered synthesis: its text and parameters in
     # `tts_recordings`, its audio in a content-addressed file under the
@@ -309,6 +387,47 @@ class Settings(BaseSettings):
         return bool(self.stt_base_url.strip() and self.stt_api_key.strip())
 
     @property
+    def has_voice_agent(self) -> bool:
+        # Both halves or neither, for the reason `has_tts` gives.
+        return bool(self.voice_agent_base_url.strip() and self.voice_agent_api_key.strip())
+
+    @property
+    def voice_agent_ice_server_list(self) -> list[dict]:
+        """`VOICE_AGENT_ICE_SERVERS`, parsed. Raises `ValueError` when malformed.
+
+        Parsed on every read rather than cached: it is read once per call
+        opened, and a cached copy is one more thing a test's `monkeypatch`
+        would have to know about.
+        """
+        parsed = json.loads(self.voice_agent_ice_servers or "[]")
+        if not isinstance(parsed, list) or not all(
+            isinstance(entry, dict) and entry.get("urls") for entry in parsed
+        ):
+            raise ValueError("VOICE_AGENT_ICE_SERVERS must be a JSON list of {urls: …} objects")
+        for entry in parsed:
+            urls = entry["urls"] if isinstance(entry["urls"], list) else [entry["urls"]]
+            # Every browser's `RTCPeerConnection` constructor throws on a TURN
+            # URL without both halves of a credential — after the microphone
+            # is already open — so it is refused here instead, where it is one
+            # line in a boot log rather than every call failing.
+            if any(str(url).startswith(("turn:", "turns:")) for url in urls) and not (
+                entry.get("username") and entry.get("credential")
+            ):
+                raise ValueError(
+                    "VOICE_AGENT_ICE_SERVERS: a turn: entry needs username and credential "
+                    "(or use VOICE_AGENT_TURN_URLS with VOICE_AGENT_TURN_SECRET)"
+                )
+        return parsed
+
+    @property
+    def voice_agent_turn_url_list(self) -> list[str]:
+        return [url.strip() for url in self.voice_agent_turn_urls.split(",") if url.strip()]
+
+    @property
+    def has_voice_turn(self) -> bool:
+        return bool(self.voice_agent_turn_url_list and self.voice_agent_turn_secret.strip())
+
+    @property
     def has_broker(self) -> bool:
         return bool(self.rabbitmq_url.strip())
 
@@ -405,6 +524,34 @@ class Settings(BaseSettings):
             problems.append("STT_STREAM_DRAIN_SECONDS must be at least 1")
         if self.stt_stream_max_seconds < 1 or self.stt_stream_idle_seconds < 1:
             problems.append("STT_STREAM_* must be positive")
+        if bool(self.voice_agent_base_url.strip()) != bool(self.voice_agent_api_key.strip()):
+            problems.append("VOICE_AGENT_BASE_URL and VOICE_AGENT_API_KEY must be set together")
+        if self.voice_agent_max_session_seconds < 60:
+            problems.append("VOICE_AGENT_MAX_SESSION_SECONDS must be at least 60")
+        if self.voice_agent_heartbeat_seconds < 1:
+            problems.append("VOICE_AGENT_HEARTBEAT_SECONDS must be positive")
+        # One missed beat must not end a call. Below two intervals, a single
+        # request lost to a network switch is billed as a hang-up and the
+        # client is told to stop a conversation that was going fine.
+        if self.voice_agent_heartbeat_timeout_seconds < 2 * self.voice_agent_heartbeat_seconds:
+            problems.append(
+                "VOICE_AGENT_HEARTBEAT_TIMEOUT_SECONDS must be at least twice "
+                "VOICE_AGENT_HEARTBEAT_SECONDS"
+            )
+        if self.voice_agent_max_concurrent_per_user < 1:
+            problems.append("VOICE_AGENT_MAX_CONCURRENT_PER_USER must be at least 1")
+        if self.voice_agent_max_opens_per_minute < 1:
+            problems.append(
+                "VOICE_AGENT_MAX_OPENS_PER_MINUTE must be at least 1 (set it high, not to 0, to lift it)"
+            )
+        try:
+            _ = self.voice_agent_ice_server_list
+        except ValueError as error:
+            problems.append(str(error))
+        if bool(self.voice_agent_turn_url_list) != bool(self.voice_agent_turn_secret.strip()):
+            problems.append("VOICE_AGENT_TURN_URLS and VOICE_AGENT_TURN_SECRET must be set together")
+        if self.voice_agent_turn_secret.strip() and len(self.voice_agent_turn_secret.encode()) < 16:
+            problems.append("VOICE_AGENT_TURN_SECRET is shorter than 16 bytes")
 
         # SQLite serialises writers and silently ignores `FOR UPDATE`. It is
         # fine for development and for the tests; it is not a money database.

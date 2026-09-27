@@ -214,6 +214,15 @@ class WalletAuditResponse(_Schema):
         "a delivery.",
         examples=[0],
     )
+    voice_ended: int = Field(
+        default=0,
+        description="Voice calls that were over and unbilled — quiet and no "
+        "longer held by the agent, or past their ceiling — billed to their last "
+        "proof of life, or released at zero if they never connected. The "
+        "in-process sweep normally gets there first; this is the same pass on "
+        "demand.",
+        examples=[0],
+    )
     reaped: int = Field(
         description="Sessions that outlived their deadline and were closed, "
         "handing back the credit they still held. Above zero means something "

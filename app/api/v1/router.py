@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1 import admin, auth, oauth, stt, tts, usage, wallet
+from app.api.v1 import admin, auth, oauth, stt, tts, usage, voice, wallet
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
@@ -9,6 +9,7 @@ api_router.include_router(oauth.router, prefix="/auth")
 api_router.include_router(wallet.router)
 api_router.include_router(tts.router)
 api_router.include_router(stt.router)
+api_router.include_router(voice.router)
 # Its own prefix rather than a `/wallet` sub-route: consumption is not money,
 # and the day STT and chat report here nobody should have to explain why usage
 # lives under the wallet.

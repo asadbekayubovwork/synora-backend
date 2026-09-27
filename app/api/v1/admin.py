@@ -24,7 +24,7 @@ from app.schemas.wallet import (
     WalletResponse,
     wallet_response,
 )
-from app.services.ai import tts_batch_service
+from app.services.ai import tts_batch_service, voice_agent_service
 from app.services.billing import reconcile_service, wallet_repo, wallet_service
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -209,6 +209,13 @@ async def read_wallet(
         "its session is flagged `disputed`, because a charge made on a "
         "deadline is a weaker thing than a charge made on a delivery and "
         "support should be able to find it.\n\n"
+        "**`voice_ended`** counts voice calls that were over and had not been "
+        "billed: a heartbeat that stopped on a call the agent no longer holds, "
+        "a call past its ceiling, or an offer our own process died during. "
+        "Each is billed to its last proof of life — or released at zero if it "
+        "never connected — exactly as the in-process sweep would have; this is "
+        "the same pass, run on demand. A quiet call the agent says it still "
+        "holds is kept and billed on, not ended, and is not counted.\n\n"
         "**`reaped`** counts metered sessions that outlived `expires_at` and "
         "were closed here, giving back the credit they were still holding. A "
         "call places its hold before any work starts, so a process that dies "
@@ -246,6 +253,11 @@ async def reconcile(
     # `heal_reserved` reads its hold as legitimate. Reconcile first and
     # anything the sweep frees waits a whole cycle to be noticed.
     swept = await tts_batch_service.sweep_stale_jobs(session)
+    # Voice calls next, and for the same reason: the reaper stands off every
+    # voice session, so a call nobody ended is reached by this pass or by the
+    # in-process loop and by nothing in `reconcile_all`. Before it, so a hold
+    # this frees is not then read by `heal_reserved` as a live call's.
+    voice_ended = await voice_agent_service.sweep(session)
     report = await reconcile_service.reconcile_all(session)
     # Recorded here rather than inside `reconcile_service`, for the same reason
     # the sweep is composed here: this is the only place that knows the whole
@@ -256,6 +268,7 @@ async def reconcile(
     return WalletAuditResponse(
         checked=report["checked"],
         swept=swept,
+        voice_ended=voice_ended,
         reaped=report["reaped"],
         healed_micros=report["healed_micros"],
         diverged=report["diverged"],

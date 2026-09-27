@@ -51,7 +51,14 @@ from app.core.exceptions import (
 )
 from app.core.metrics import MetricsMiddleware, refresh_db_gauges, render
 from app.db.session import close_db, init_db
-from app.services.ai import stt_client, stt_service, tts_client, tts_service
+from app.services.ai import (
+    stt_client,
+    stt_service,
+    tts_client,
+    tts_service,
+    voice_agent_client,
+    voice_agent_service,
+)
 from app.services.oauth import configured_providers
 
 logging.basicConfig(
@@ -142,6 +149,22 @@ hold and the debit appear under in `GET /wallet/transactions`.
 * `GET /usage` — your own consumption by service and metric, summed from the
   very rows the charges were priced from.
 
+### Voice calls
+
+A live conversation with the voice agent over WebRTC. The audio goes straight
+between the browser and the agent; this API carries the negotiation — the SDP
+offer and answer, the ICE candidates — with our key attached, so the agent's
+credential never reaches a browser.
+
+* `GET /voice/config` — ICE servers, the heartbeat cadence, and what a call
+  costs, including the hold an account needs to start one.
+* `POST /voice/sessions` — the browser's offer in, the agent's answer out.
+* `POST /voice/sessions/{id}/heartbeat` — every 15 seconds. The audio never
+  passes through this server, so this is how it learns how long a call
+  lasted. A call that goes quiet is put to the agent: still held, it is billed
+  on; gone, it is billed to its last heartbeat.
+* `DELETE /voice/sessions/{id}` — hang up; the call is billed and the hold released.
+
 ### Errors
 
 Every non-2xx body has the same shape — `detail`, `statusMessage` (the same
@@ -160,6 +183,11 @@ TAGS = [
     {
         "name": "TTS",
         "description": "Metered speech synthesis: streaming, batch jobs and voices.",
+    },
+    {
+        "name": "Voice agent",
+        "description": "Live voice calls with the agent: WebRTC signalling through us, "
+        "audio straight to the agent, billed per minute on the client's heartbeat.",
     },
     {
         "name": "Usage",
@@ -205,6 +233,12 @@ async def lifespan(_: FastAPI):
         settings.stt_base_url if settings.has_stt else "not configured (transcription answers 503)",
     )
     logger.info(
+        "Voice agent: %s",
+        settings.voice_agent_base_url
+        if settings.has_voice_agent
+        else "not configured (opening a call answers 503; /voice/config says available: false)",
+    )
+    logger.info(
         "Batch queue: %s",
         "RabbitMQ" if settings.has_broker else "not configured (batch jobs submit inline)",
     )
@@ -213,7 +247,16 @@ async def lifespan(_: FastAPI):
     # symptom is a Prometheus target that has been down since a deploy and a
     # dashboard nobody trusts.
     logger.info("Metrics: %s", settings.metrics_status)
+    # After every check above, so a boot that is about to be refused never
+    # starts a loop it would then have to stop. The loop is what bills a call
+    # whose tab crashed; see `voice_agent_service.start_sweeper`.
+    voice_agent_service.start_sweeper()
     yield
+    # First, and asked rather than cancelled: a pass in flight is settling
+    # calls, and a cancelled settlement is a lost charge. It needs the database
+    # and nothing else below, so stopping it before `drain_settlements` costs
+    # the TTS drain nothing.
+    await voice_agent_service.stop_sweeper()
     # Shutdown is ordered by what each step still needs to be alive, and the
     # settlements go first. `tts_service` finishes a stream's billing in a
     # detached task, because a client disconnect reaches us as a cancellation
@@ -246,6 +289,7 @@ async def lifespan(_: FastAPI):
     # `reconcile_service.reap_expired_sessions`. Late, rather than lost.
     await tts_client.aclose_client()
     await stt_client.aclose_client()
+    await voice_agent_client.aclose_client()
     await close_broker()
     # `close_cache` is the twin of `close_broker` and was the one thing this
     # list forgot: the Redis pool stayed open across a shutdown that closed

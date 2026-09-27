@@ -36,11 +36,11 @@ the endpoint off rather than let it produce plausible nonsense.
 
 ## Gauges that only the database knows
 
-Held credit, live sessions and open batch jobs cannot be counted in-process:
-they survive restarts and they are the sum of rows, not of events. So
-`refresh_db_gauges` runs three aggregates at scrape time and the `/metrics`
-route awaits it. Three `SELECT SUM(...)`s every fifteen seconds is nothing next
-to what a single synthesis does, and the alternative — deriving held credit from
+Held credit, live sessions, open batch jobs and voice calls in progress cannot
+be counted in-process: they survive restarts and they are the sum of rows, not
+of events. So `refresh_db_gauges` runs four aggregates at scrape time and the
+`/metrics` route awaits it. Four small `SELECT`s every fifteen seconds is
+nothing next to what a single synthesis does, and the alternative — deriving held credit from
 hold and release counters — is wrong the first time a process restarts mid
 stream. `METRICS_DB_GAUGES=false` turns them off for a deployment that would
 rather not pay even that.
@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 from prometheus_client import generate_latest as _generate_latest
@@ -254,6 +254,71 @@ stt_audio_seconds = Counter(
 )
 
 
+# --- the voice agent ----------------------------------------------------------
+#
+# Signalling only: the audio never passes through this process, so there is no
+# byte or segment count to keep. What there is — how long the agent took to
+# answer an offer, how calls end, how long they were billed for — is below.
+
+voice_upstream_seconds = Histogram(
+    "synora_voice_upstream_seconds",
+    "Time the voice agent took to answer, by operation. `offer` includes the "
+    "agent building a pipeline for the call and runs to tens of seconds on a "
+    "cold start; `candidates` is a relay and `probe` a liveness check, and "
+    "both should be milliseconds.",
+    ("operation",),
+    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 45.0),
+    registry=REGISTRY,
+)
+voice_upstream_errors = Counter(
+    "synora_voice_upstream_errors_total",
+    "Voice agent failures by the code we mapped them to, not by status.",
+    ("operation", "code"),
+    registry=REGISTRY,
+)
+voice_calls = Counter(
+    "synora_voice_calls_total",
+    "Voice calls that ended, by how. `connected` is `yes` for a call that was "
+    "billed; `no` for one the agent answered whose media never came up — ICE "
+    "that failed, most often for want of a TURN server; and `unanswered` for an "
+    "offer the agent refused or never answered, which is an agent problem and "
+    "not a network one. Neither of the last two charges anything.",
+    ("end_reason", "connected"),
+    registry=REGISTRY,
+)
+voice_probes = Counter(
+    "synora_voice_probes_total",
+    "Liveness probes of a call the agent may still hold, by answer. `unknown` "
+    "is an agent that could not be asked or gave an answer that means nothing.",
+    ("result",),
+    registry=REGISTRY,
+)
+voice_nudges = Counter(
+    "synora_voice_nudges_total",
+    "Unroutable candidates relayed to calls that never heartbeated, by whether "
+    "the agent took them. `refused` above zero means the agent will not take the "
+    "nudge on this deployment, and never-heartbeated calls then stay unbilled.",
+    ("result",),
+    registry=REGISTRY,
+)
+voice_calls_kept = Counter(
+    "synora_voice_calls_kept_total",
+    "Quiet spells the agent vouched for: a connected call whose client stopped "
+    "heartbeating while the agent still held it, counted once per silence rather "
+    "than once per re-check, plus a never-heartbeated call the moment it proves "
+    "it connected. Each one is billing that went on instead of ending — a "
+    "network, a bug, or somebody trying it on.",
+    registry=REGISTRY,
+)
+voice_call_seconds = Counter(
+    "synora_voice_call_seconds_total",
+    "Seconds of conversation billed: from the first heartbeat — or, for a call "
+    "the agent vouched for without one, its answer — to hang-up, capped at the "
+    "ceiling. Added when a call settles, all at once.",
+    registry=REGISTRY,
+)
+
+
 # --- money ------------------------------------------------------------------
 
 sessions_settled = Counter(
@@ -360,6 +425,13 @@ ai_sessions_open = Gauge(
     ("status",),
     registry=REGISTRY,
 )
+voice_calls_live = Gauge(
+    "synora_voice_calls_live",
+    "Voice calls not yet settled: talking, or quiet and not yet decided. Read "
+    "from `voice_calls` at scrape time, like the session gauges — a call outlives "
+    "the process that opened it, so no in-process counter could know this.",
+    registry=REGISTRY,
+)
 batch_jobs_open = Gauge(
     "synora_tts_batch_jobs_open",
     "Batch jobs still being polled, by state.",
@@ -462,6 +534,73 @@ def record_transcription(*, audio_seconds: float) -> None:
     stt_audio_seconds.inc(audio_seconds)
 
 
+def observe_voice_upstream(*, operation: str, seconds: float) -> None:
+    """One signalling request timed. `operation` is `offer`, `candidates` or `probe`."""
+    voice_upstream_seconds.labels(operation=operation).observe(seconds)
+
+
+def record_voice_upstream_error(*, operation: str, code: str) -> None:
+    voice_upstream_errors.labels(operation=operation, code=code).inc()
+
+
+def record_voice_probe(*, result: str) -> None:
+    voice_probes.labels(result=result).inc()
+
+
+def record_voice_nudge(*, result: str) -> None:
+    voice_nudges.labels(result=result).inc()
+
+
+def record_voice_call_kept() -> None:
+    voice_calls_kept.inc()
+
+
+def prime_voice_series(
+    *,
+    connected_reasons: Iterable[str] = (),
+    unconnected_reasons: Iterable[str] = (),
+    unanswered_reasons: Iterable[str] = (),
+    errors: Iterable[tuple[str, str]] = (),
+    operations: Iterable[str] = (),
+) -> None:
+    """Export every voice series at zero from the moment the process starts.
+
+    A labelled child is created by its first `inc()`, already at one, and
+    `rate()` and `increase()` never see that first step: they need a sample
+    before it, and there is none. On the speech routes that loses one event per
+    label per restart among thousands. Voice calls are few, and the panels that
+    read these are the ones that must not lie on the first occurrence — a
+    "calls that never connected" share reading 0% when every call failed, an
+    error panel that stays empty through the first outage. So the closed sets
+    are created at zero here, by the modules that know them: `app.core` may not
+    import the enums that name them.
+    """
+    for reason in connected_reasons:
+        voice_calls.labels(end_reason=reason, connected="yes")
+    for reason in unconnected_reasons:
+        voice_calls.labels(end_reason=reason, connected="no")
+    for reason in unanswered_reasons:
+        voice_calls.labels(end_reason=reason, connected="unanswered")
+    for operation, code in errors:
+        voice_upstream_errors.labels(operation=operation, code=code)
+    for operation in operations:
+        voice_upstream_seconds.labels(operation=operation)
+    for result in ("alive", "gone", "unknown", "canary_trusted", "canary_untrusted"):
+        voice_probes.labels(result=result)
+    for result in ("taken", "refused", "unreachable"):
+        voice_nudges.labels(result=result)
+
+
+def record_voice_call(
+    *, end_reason: str, connected: bool, billed_seconds: float, answered: bool = True
+) -> None:
+    """One call, settled. Counted where the settlement happened, once."""
+    label = "yes" if connected else "no" if answered else "unanswered"
+    voice_calls.labels(end_reason=end_reason, connected=label).inc()
+    if billed_seconds:
+        voice_call_seconds.inc(billed_seconds)
+
+
 def record_settlement(
     *,
     service: str,
@@ -500,7 +639,7 @@ def record_reconcile(report: Mapping[str, int]) -> None:
 
 
 async def refresh_db_gauges() -> None:
-    """Read the four things a counter cannot know. Never raises.
+    """Read the five things a counter cannot know. Never raises.
 
     Imported inside the function: `app.core` must not import `app.models` at
     module scope, or `app.db.base` and everything under it is dragged into
@@ -523,6 +662,7 @@ async def refresh_db_gauges() -> None:
         TtsBatchJobState,
     )
     from app.models.tts_job import TtsBatchJob
+    from app.models.voice_call import VoiceCall
     from app.models.wallet import Wallet
 
     try:
@@ -574,6 +714,18 @@ async def refresh_db_gauges() -> None:
                 batch_jobs_open.labels(state=state.value).set(
                     counted_jobs.get(state.value, 0)
                 )
+
+            # Served by `ix_voice_calls_live_seen`, which is partial on exactly
+            # this predicate: the count reads the handful of live calls, never
+            # the history.
+            live_calls = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(VoiceCall)
+                    .where(VoiceCall.ended_at.is_(None))
+                )
+            ).scalar_one()
+            voice_calls_live.set(int(live_calls))
     except Exception:  # noqa: BLE001 - a scrape must not be able to 500
         logger.warning("metrics_db_gauges_failed", exc_info=True)
 

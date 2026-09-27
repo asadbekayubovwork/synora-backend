@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Agent — Test Client</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #18181b; --muted: #71717a; --line: #e4e4e7;
+    --card: #fafafa; --accent: #2563eb; --ok: #15803d; --err: #b91c1c;
+    --user: #eff6ff; --agent: #f4f4f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #09090b; --fg: #fafafa; --muted: #a1a1aa; --line: #27272a;
+      --card: #18181b; --accent: #60a5fa; --ok: #4ade80; --err: #f87171;
+      --user: #172554; --agent: #27272a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #09090b; --fg: #fafafa; --muted: #a1a1aa; --line: #27272a;
+    --card: #18181b; --accent: #60a5fa; --ok: #4ade80; --err: #f87171;
+    --user: #172554; --agent: #27272a;
+  }
+  * { box-sizing: border-box }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 32px 16px 64px }
+  h1 { font-size: 22px; margin: 0 0 4px }
+  .sub { color: var(--muted); font-size: 14px; margin: 0 0 24px }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 16px; margin-bottom: 16px;
+  }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px }
+  input {
+    width: 100%; padding: 9px 11px; font: inherit; font-size: 14px;
+    color: var(--fg); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px;
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap }
+  .row + .row { margin-top: 12px }
+  button {
+    font: inherit; font-weight: 500; padding: 10px 20px; border-radius: 8px;
+    border: 1px solid transparent; cursor: pointer;
+  }
+  button:disabled { opacity: .45; cursor: not-allowed }
+  #start { background: var(--accent); color: #fff }
+  #stop  { background: transparent; color: var(--fg); border-color: var(--line) }
+  #check { background: transparent; color: var(--fg); border-color: var(--line); padding: 7px 14px; font-size: 14px }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none }
+  .dot.live { background: var(--ok) }
+  .dot.bad  { background: var(--err) }
+  #status { font-size: 14px; color: var(--muted) }
+  #log {
+    margin-top: 16px; display: flex; flex-direction: column; gap: 8px;
+    max-height: 340px; overflow-y: auto;
+  }
+  .msg { padding: 9px 13px; border-radius: 10px; max-width: 85%; font-size: 14px }
+  .msg.user  { background: var(--user);  align-self: flex-end }
+  .msg.agent { background: var(--agent); align-self: flex-start }
+  .msg.sys   { background: transparent; color: var(--muted); font-size: 13px;
+               align-self: center; text-align: center; max-width: 100% }
+  .msg.sys.bad { color: var(--err) }
+  .hint { font-size: 13px; color: var(--muted); margin-top: 10px }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Voice Agent — Test Client</h1>
+  <p class="sub">Verify the API works before you write any integration code.</p>
+
+  <div class="card">
+    <div class="row" style="display:block">
+      <label for="url">Base URL</label>
+      <input id="url" placeholder="https://your-agent.example.com" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="row" style="display:block">
+      <label for="key">API key (X-API-Key)</label>
+      <input id="key" type="password" placeholder="pv_ak_…" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="row">
+      <button id="check">Check connection</button>
+      <span class="dot" id="dot"></span>
+      <span id="status">not connected</span>
+    </div>
+    <p class="hint">Stored in this browser only (localStorage), never sent anywhere but the Base URL above.</p>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button id="start">Start</button>
+      <button id="stop" disabled>Stop</button>
+    </div>
+    <div id="log"></div>
+  </div>
+
+  <audio id="agent-audio" autoplay></audio>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const urlEl = $("url"), keyEl = $("key"), dot = $("dot"), statusEl = $("status");
+const startBtn = $("start"), stopBtn = $("stop"), logEl = $("log"), audioEl = $("agent-audio");
+
+// --- persist the two settings (never the transcript) ---------------------
+try {
+  urlEl.value = localStorage.getItem("va.url") || "";
+  keyEl.value = localStorage.getItem("va.key") || "";
+} catch {}
+const save = () => {
+  try {
+    localStorage.setItem("va.url", urlEl.value.trim().replace(/\/+$/, ""));
+    localStorage.setItem("va.key", keyEl.value.trim());
+  } catch {}
+};
+urlEl.onchange = keyEl.onchange = save;
+
+const BASE = () => urlEl.value.trim().replace(/\/+$/, "");
+const headers = () => ({ "Content-Type": "application/json", "X-API-Key": keyEl.value.trim() });
+
+function setStatus(text, state) {
+  statusEl.textContent = text;
+  dot.className = "dot" + (state ? " " + state : "");
+}
+function addMsg(who, text) {
+  const d = document.createElement("div");
+  d.className = "msg " + who;
+  d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// --- Step 1: reachability -------------------------------------------------
+$("check").onclick = async () => {
+  save();
+  if (!BASE()) return setStatus("enter a Base URL", "bad");
+  setStatus("checking…");
+  try {
+    const r = await fetch(`${BASE()}/healthz`);
+    const j = await r.json();
+    if (r.ok && j.status === "ok") setStatus("service reachable", "live");
+    else setStatus(`unexpected response (HTTP ${r.status})`, "bad");
+  } catch {
+    setStatus("unreachable — wrong URL, service down, or origin not allow-listed", "bad");
+  }
+};
+
+// --- Step 2-5: the session ------------------------------------------------
+let session = null;
+
+async function startSession() {
+  const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+  const pc = new RTCPeerConnection({
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+  });
+
+  pc.ontrack = (e) => {
+    if (e.track.kind === "audio") audioEl.srcObject = e.streams[0];
+  };
+
+  // Rule 1 — both transceivers, even though this is audio-only.
+  pc.addTransceiver(micStream.getAudioTracks()[0], { direction: "sendrecv" });
+  pc.addTransceiver("video", { direction: "sendrecv" });
+
+  // Rule 2 — the client creates the data channel; the server never does.
+  const channel = pc.createDataChannel("events");
+  let keepalive = null;
+  // Rule 3 — ping every second or the session is dropped after 3s.
+  channel.onopen = () => {
+    keepalive = setInterval(() => {
+      if (channel.readyState === "open") channel.send("ping");
+    }, 1000);
+  };
+  channel.onmessage = (e) => {
+    let msg; try { msg = JSON.parse(e.data); } catch { return; }
+    handleEvent(msg);
+  };
+
+  // Trickle ICE — queue candidates until we have a pc_id.
+  let pcId = null;
+  const queued = [];
+  const sendCandidate = (c) =>
+    fetch(`${BASE()}/api/offer`, {
+      method: "PATCH",
+      headers: headers(),
+      body: JSON.stringify({
+        pc_id: pcId,
+        candidates: [{
+          candidate: c.candidate,
+          sdp_mid: c.sdpMid,
+          sdp_mline_index: c.sdpMLineIndex,
+        }],
+      }),
+    }).catch(() => {});
+  pc.onicecandidate = (e) => {
+    if (!e.candidate) return;
+    if (pcId) sendCandidate(e.candidate); else queued.push(e.candidate);
+  };
+
+  pc.onconnectionstatechange = () => {
+    const s = pc.connectionState;
+    if (s === "connected") setStatus("connected — speak", "live");
+    else if (["failed", "disconnected", "closed"].includes(s)) {
+      setStatus(s, "bad");
+      if (s !== "closed") stopSession();
+    }
+  };
+
+  await pc.setLocalDescription(await pc.createOffer());
+
+  const res = await fetch(`${BASE()}/api/offer`, {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({
+      sdp: pc.localDescription.sdp,
+      type: pc.localDescription.type,
+    }),
+  });
+  if (res.status === 401) throw new Error("Invalid or missing API key");
+  if (!res.ok) throw new Error(`Could not start session (HTTP ${res.status})`);
+
+  const answer = await res.json();
+  pcId = answer.pc_id;
+  await pc.setRemoteDescription(answer);
+
+  for (const c of queued) await sendCandidate(c);
+  queued.length = 0;
+
+  return {
+    stop() {
+      if (keepalive) clearInterval(keepalive);
+      try { channel.close(); } catch {}
+      pc.close();
+      for (const t of micStream.getTracks()) t.stop();
+      audioEl.srcObject = null;
+    },
+  };
+}
+
+// --- Step 4: render the events -------------------------------------------
+function handleEvent(msg) {
+  switch (msg.type) {
+    case "user-transcription":
+      if (msg.data?.final) addMsg("user", msg.data.text);
+      break;
+    case "bot-output":
+      // Fires twice per sentence — take the completed one.
+      if (msg.data?.spoken_status === "completed") addMsg("agent", msg.data.text);
+      break;
+    case "user-started-speaking": setStatus("listening…", "live"); break;
+    case "bot-started-speaking":  setStatus("agent speaking…", "live"); break;
+    case "bot-stopped-speaking":  setStatus("connected — speak", "live"); break;
+    case "bot-interrupted":       addMsg("sys", "(interrupted)"); break;
+    case "error":
+      addMsg("sys bad", `error: ${msg.data?.message || "unknown"}`);
+      break;
+  }
+}
+
+startBtn.onclick = async () => {
+  save();
+  if (!BASE() || !keyEl.value.trim()) return setStatus("Base URL and API key are required", "bad");
+  startBtn.disabled = true;
+  setStatus("requesting microphone…");
+  try {
+    session = await startSession();
+    stopBtn.disabled = false;
+    addMsg("sys", "session started");
+  } catch (err) {
+    startBtn.disabled = false;
+    const m = err?.name === "NotAllowedError" ? "microphone permission denied"
+            : err?.name === "NotFoundError"   ? "no microphone found"
+            : err.message;
+    setStatus(m, "bad");
+    addMsg("sys bad", m);
+  }
+};
+
+function stopSession() {
+  session?.stop();
+  session = null;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+}
+
+stopBtn.onclick = () => {
+  stopSession();
+  setStatus("stopped");
+  addMsg("sys", "session ended");
+};
+
+window.addEventListener("pagehide", () => session?.stop());
+</script>
+</body>
+</html>

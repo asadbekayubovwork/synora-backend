@@ -199,10 +199,19 @@ class Settlement:
 # --- helpers ---------------------------------------------------------------
 
 
-async def _load(session: AsyncSession, ai_session_id: uuid.UUID) -> AiSession:
-    row = (
-        await session.execute(select(AiSession).where(AiSession.id == ai_session_id))
-    ).scalar_one_or_none()
+async def _load(
+    session: AsyncSession, ai_session_id: uuid.UUID, *, fresh: bool = False
+) -> AiSession:
+    """The session row. `fresh` re-reads it over whatever the identity map holds.
+
+    Without it a second `SELECT` in the same session hands back the instance
+    already loaded, attributes and all — so "has somebody else finished this
+    since I looked?" is answered with what *this* session saw the first time.
+    """
+    query = select(AiSession).where(AiSession.id == ai_session_id)
+    if fresh:
+        query = query.execution_options(populate_existing=True)
+    row = (await session.execute(query)).scalar_one_or_none()
     if row is None:
         raise NotFoundError("No such session.", code="ai_session_not_found")
     return row
@@ -718,12 +727,19 @@ async def settle_oneshot(
     quantities: Mapping[UsageMetric, int],
     end_reason: SessionEndReason,
     upstream_request_id: str | None = None,
+    disputed: bool = False,
 ) -> Settlement:
     """Charge for the work, release the hold, close the session.
 
     Callers report **cumulative** quantities and only metrics the price book
     covers — see the comment on `price_cumulative` below, which is the one way
     to make this function raise where nobody can catch it.
+
+    `disputed` is for a caller that knows its quantities are an inference
+    rather than a measurement — a voice call whose heartbeats stopped, billed
+    to the last one we heard. The row is flagged in the same transaction as
+    the charge, which is the point: support finds these with one predicate,
+    and a flag written in a second transaction is a flag a crash can lose.
     """
     row = await _load(session, ai_session_id)
 
@@ -906,7 +922,7 @@ async def settle_oneshot(
     row.cost_micros = priced.cost_micros
     # `or`, not `=`: `_collect` may already have flagged a forced write-off,
     # and an unclamped price must not clear it again.
-    row.disputed = row.disputed or clamped
+    row.disputed = row.disputed or clamped or disputed
     # One report, so at least one heartbeat. Counting it keeps a one-shot row
     # and a realtime row comparable in the same query. `max`, not `=`, because
     # `touch_session` bumps this as bytes move: overwriting a real progress
@@ -1222,6 +1238,20 @@ async def abandon_oneshot(
             ai_session_id=row.id,
             note="Abandoned one-shot session",
         )
+        # Read again, and it is not caution. A second abandon racing this one
+        # from another connection wrote the release first, so ours met its key
+        # in `wallet_repo._flush_ledger`, which rolled the whole transaction back
+        # and replayed the winner's answer. A rollback expires every loaded
+        # instance, `row` included — touching it would be a lazy load on an
+        # async session, which raises rather than loads — and the winner has
+        # already stamped the session terminal, which is the one fact that
+        # decides what happens next. `fresh`, because when the release was
+        # replayed without a rollback the identity map still holds our first,
+        # stale read — and stamping `_finish` over the winner's terminal row
+        # would overwrite its end reason with ours.
+        row = await _load(session, ai_session_id, fresh=True)
+        if row.status in TERMINAL_SESSION_STATUSES:
+            return
     _finish(
         row,
         status=status,
